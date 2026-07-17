@@ -1,6 +1,4 @@
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ConversationHandler
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -15,8 +13,7 @@ from bot_handlers import (
     cmd_add, cmd_remove, cmd_update, cmd_list, cmd_clear, cmd_sync,
     cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_privacy, cmd_reportstyle,
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert,
-    cmd_help, cmd_start, clear_confirmation, remove_confirmation, update_confirmation,
-    CONFIRM_CLEAR, CONFIRM_REMOVE, CONFIRM_UPDATE,
+    cmd_help, cmd_start, on_confirmation,
 )
 from telegram_handler import send_daily_report
 from alerts import check_price_alerts
@@ -64,6 +61,9 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("add", cmd_add))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("portfolio", cmd_list))
     app.add_handler(CommandHandler("sync", cmd_sync))
@@ -79,29 +79,8 @@ def main():
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("unalert", cmd_unalert))
 
-    # Clear conversation handler
-    clear_handler = ConversationHandler(
-        entry_points=[CommandHandler("clear", cmd_clear)],
-        states={CONFIRM_CLEAR: [MessageHandler(filters.TEXT, clear_confirmation)]},
-        fallbacks=[CommandHandler("help", cmd_help)],
-    )
-    app.add_handler(clear_handler)
-
-    # Remove conversation handler (asks for confirmation before deleting a holding)
-    remove_handler = ConversationHandler(
-        entry_points=[CommandHandler("remove", cmd_remove)],
-        states={CONFIRM_REMOVE: [MessageHandler(filters.TEXT, remove_confirmation)]},
-        fallbacks=[CommandHandler("help", cmd_help)],
-    )
-    app.add_handler(remove_handler)
-
-    # Update conversation handler (asks for confirmation before overwriting a holding)
-    update_handler = ConversationHandler(
-        entry_points=[CommandHandler("update", cmd_update)],
-        states={CONFIRM_UPDATE: [MessageHandler(filters.TEXT, update_confirmation)]},
-        fallbacks=[CommandHandler("help", cmd_help)],
-    )
-    app.add_handler(update_handler)
+    # Inline Confirm/Cancel buttons for /remove, /update, /clear
+    app.add_handler(CallbackQueryHandler(on_confirmation))
 
     # Setup scheduler for daily report + periodic alert checks
     scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))

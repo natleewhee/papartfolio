@@ -24,7 +24,10 @@ TURSO_AUTH_TOKEN = _require_env("TURSO_AUTH_TOKEN")
 
 # Daily report time (SGT) — overridable at runtime via /settime, this is just the startup default
 TIMEZONE = "Asia/Singapore"
-DAILY_REPORT_TIME = "20:30"  # 8:30 PM SGT (end of US trading)
+# 20:30 SGT is US pre-market (~08:30 ET): both feeds are "settled" — SG's session
+# has closed and the US figures reflect the last completed US session — so the
+# report avoids partial-day noise. (Not literally the end of US trading.)
+DAILY_REPORT_TIME = "20:30"
 
 # Portfolio totals are converted to this currency for the combined grand total
 HOME_CURRENCY = "SGD"

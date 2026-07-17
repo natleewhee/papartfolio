@@ -1,7 +1,7 @@
 import requests
 from telegram.ext import ContextTypes
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
-from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table
+from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting
 from datetime import datetime
 import pytz
@@ -66,6 +66,11 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
 
         for currency, rate in metrics["fx_rates"].items():
             report += f"FX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}\n"
+
+        breakdown = get_currency_breakdown(metrics)
+        if len(breakdown) > 1:
+            mix = " / ".join(f"{ccy} {pct:.0f}%" for ccy, pct in sorted(breakdown.items(), key=lambda x: -x[1]))
+            report += f"Currency Mix: {mix}\n"
 
         if metrics["fx_warnings"]:
             warned = ", ".join(metrics["fx_warnings"])

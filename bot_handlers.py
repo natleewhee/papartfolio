@@ -1,5 +1,5 @@
-from telegram import Update
-from telegram.ext import ContextTypes, ConversationHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from fetcher import validate_symbol, get_price, get_currency_for_symbol
@@ -19,10 +19,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Conversation states
-CONFIRM_CLEAR = 1
-CONFIRM_REMOVE = 2
-CONFIRM_UPDATE = 3
+# Inline Yes/Cancel keyboard for destructive-action confirmations. Using
+# callback buttons (rather than a text "reply YES" ConversationHandler) means
+# an unrelated command typed mid-confirmation is never swallowed, and two
+# pending confirmations can't cross-fire.
+_CONFIRM_KEYBOARD = InlineKeyboardMarkup([[
+    InlineKeyboardButton("✅ Confirm", callback_data="confirm"),
+    InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+]])
 
 async def check_user(update: Update) -> bool:
     """Verify message is from authorized user."""
@@ -141,27 +145,12 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {symbol} not found in portfolio")
         return
 
-    context.user_data["pending_remove"] = symbol
+    context.user_data["pending_action"] = ("remove", symbol)
     await update.message.reply_text(
-        f"⚠️ Remove {symbol} from your portfolio?\n\nReply with 'YES' to confirm or anything else to cancel"
+        f"⚠️ Remove *{symbol}* from your portfolio?",
+        parse_mode="Markdown",
+        reply_markup=_CONFIRM_KEYBOARD,
     )
-    return CONFIRM_REMOVE
-
-async def remove_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /remove confirmation"""
-    if not await check_user(update):
-        return ConversationHandler.END
-
-    symbol = context.user_data.pop("pending_remove", None)
-    if symbol and update.message.text.upper() == "YES":
-        if remove_holding(symbol):
-            await update.message.reply_text(f"✅ Removed {symbol}")
-        else:
-            await update.message.reply_text(f"❌ {symbol} not found in portfolio")
-    else:
-        await update.message.reply_text("❌ Cancelled")
-
-    return ConversationHandler.END
 
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /update SYMBOL SHARES AVG_COST (asks for confirmation before overwriting)"""
@@ -195,39 +184,20 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         currency = existing.get("currency") or "USD"
-        context.user_data["pending_update"] = (symbol, shares, avg_cost)
+        context.user_data["pending_action"] = ("update", symbol, shares, avg_cost)
         await update.message.reply_text(
-            f"⚠️ Overwrite {symbol}?\n"
+            f"⚠️ Overwrite *{symbol}*?\n"
             f"  {existing['shares']} @ {fmt_money(existing['avg_cost'], currency)} → "
-            f"{shares} @ {fmt_money(avg_cost, currency)}\n\n"
-            f"Reply with 'YES' to confirm or anything else to cancel"
+            f"{shares} @ {fmt_money(avg_cost, currency)}",
+            parse_mode="Markdown",
+            reply_markup=_CONFIRM_KEYBOARD,
         )
-        return CONFIRM_UPDATE
 
     except ValueError:
         await update.message.reply_text("❌ Shares and cost must be numbers")
     except Exception as e:
         logger.error(f"Error in /update: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
-
-async def update_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /update confirmation"""
-    if not await check_user(update):
-        return ConversationHandler.END
-
-    pending = context.user_data.pop("pending_update", None)
-    if pending and update.message.text.upper() == "YES":
-        symbol, shares, avg_cost = pending
-        if update_holding(symbol, shares, avg_cost):
-            await update.message.reply_text(
-                f"✅ Updated {symbol}\nShares: {shares}\nAvg Cost: {avg_cost}"
-            )
-        else:
-            await update.message.reply_text(f"❌ Error updating {symbol}")
-    else:
-        await update.message.reply_text("❌ Cancelled")
-
-    return ConversationHandler.END
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /list and /portfolio"""
@@ -286,6 +256,9 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mix = " / ".join(f"{ccy} {pct:.0f}%" for ccy, pct in sorted(breakdown.items(), key=lambda x: -x[1]))
             msg += f"\nCurrency Mix: {mix}"
 
+        for currency, rate in metrics["fx_rates"].items():
+            msg += f"\nFX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}"
+
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
@@ -297,22 +270,46 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_user(update):
         return
 
-    msg = "⚠️ This will delete ALL holdings!\n\nReply with 'YES' to confirm or anything else to cancel"
-    await update.message.reply_text(msg)
-    return CONFIRM_CLEAR
+    context.user_data["pending_action"] = ("clear",)
+    await update.message.reply_text(
+        "⚠️ This will delete *ALL* holdings!",
+        parse_mode="Markdown",
+        reply_markup=_CONFIRM_KEYBOARD,
+    )
 
-async def clear_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle clear confirmation"""
-    if not await check_user(update):
-        return ConversationHandler.END
+async def on_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the inline Confirm/Cancel button for /remove, /update, /clear."""
+    query = update.callback_query
+    if query.from_user.id != TELEGRAM_USER_ID:
+        await query.answer("❌ Unauthorized", show_alert=True)
+        return
 
-    if update.message.text.upper() == "YES":
-        clear_all_holdings()
-        await update.message.reply_text("✅ Portfolio cleared")
-    else:
-        await update.message.reply_text("❌ Cancelled")
+    await query.answer()
+    pending = context.user_data.pop("pending_action", None)
 
-    return ConversationHandler.END
+    # "cancel" tapped, or the prompt expired (e.g. bot restarted — user_data is in-memory)
+    if query.data == "cancel" or not pending:
+        await query.edit_message_text("❌ Cancelled")
+        return
+
+    action = pending[0]
+    try:
+        if action == "remove":
+            symbol = pending[1]
+            ok = remove_holding(symbol)
+            await query.edit_message_text(f"✅ Removed {symbol}" if ok else f"❌ {symbol} not found in portfolio")
+        elif action == "clear":
+            clear_all_holdings()
+            await query.edit_message_text("✅ Portfolio cleared")
+        elif action == "update":
+            _, symbol, shares, avg_cost = pending
+            ok = update_holding(symbol, shares, avg_cost)
+            await query.edit_message_text(
+                f"✅ Updated {symbol}: {shares} @ {avg_cost}" if ok else f"❌ Error updating {symbol}"
+            )
+    except Exception as e:
+        logger.error(f"Error in confirmation ({action}): {e}")
+        await query.edit_message_text(f"❌ Error: {e}")
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /sync (manually trigger daily report)"""
@@ -421,7 +418,12 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *Current Settings*\n\n"
         f"Privacy mode: {'ON' if privacy else 'OFF'} (/privacy)\n"
         f"Report style: {report_style} (/reportstyle)\n"
-        f"Report time: {report_time} {TIMEZONE} (/settime)"
+        f"Report time: {report_time} {TIMEZONE} (/settime)\n\n"
+        "ℹ️ *Notes*\n"
+        "• 'Today' change is each stock's own-currency move — it excludes FX "
+        "shifts. Use /week or /month for FX-inclusive tracking.\n"
+        "• Cost basis is marked to today's FX rate, so it can drift overnight "
+        "from currency moves alone (this cancels out in Gain)."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 

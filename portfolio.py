@@ -193,7 +193,10 @@ def calculate_portfolio_metrics(save_snapshot=True):
     portfolio_daily_change = sum(h["_daily_change_home"] for h in portfolio_data)
     portfolio_daily_change_pct = (portfolio_daily_change / (total_value - portfolio_daily_change) * 100) if (total_value - portfolio_daily_change) > 0 else 0
 
-    if save_snapshot:
+    # Only record the day's aggregate if every holding priced successfully — a
+    # partial total would silently corrupt the /week and /month baselines
+    # (INSERT OR REPLACE keyed on date, with no memory a holding was missing).
+    if save_snapshot and not failed_symbols:
         save_portfolio_aggregate(
             _today().strftime("%Y-%m-%d"),
             total_value,
@@ -201,6 +204,8 @@ def calculate_portfolio_metrics(save_snapshot=True):
             portfolio_daily_change,
             portfolio_daily_change_pct,
         )
+    elif save_snapshot and failed_symbols:
+        logger.warning(f"⚠️ Skipping portfolio aggregate for today — price fetch failed for: {failed_symbols}")
 
     # Drop internal-only conversion fields before returning
     for h in portfolio_data:
