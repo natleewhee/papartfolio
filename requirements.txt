@@ -1,7 +1,7 @@
-requests==2.31.0
+requests==2.32.3
 python-telegram-bot==20.3
-python-dotenv==1.0.0
+python-dotenv==1.0.1
 apscheduler==3.10.4
-pytz==2023.3
+pytz==2024.1
 libsql==0.1.11
 yfinance==1.5.1
