@@ -1,29 +1,33 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
 
+def _require_env(name):
+    value = os.getenv(name)
+    if not value:
+        sys.exit(
+            f"❌ Missing required environment variable: {name}\n"
+            f"   Set it in your .env file (see .env.example) or in your host's environment settings."
+        )
+    return value
+
 # API Keys
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
+FINNHUB_API_KEY = _require_env("FINNHUB_API_KEY")
+TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_USER_ID = int(_require_env("TELEGRAM_USER_ID"))
 
-# Database
-DB_PATH = "portfolio.db"
+# Database (Turso — persists across Render restarts/redeploys, unlike local disk)
+TURSO_DATABASE_URL = _require_env("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = _require_env("TURSO_AUTH_TOKEN")
 
-# Technical analysis settings
-EMA_PERIODS = [20, 50]
-LOOKBACK_DAYS = 100
-
-# Macro indicators to track
-MACRO_SYMBOLS = ["SPY", "QQQ", "DXY"]  # S&P 500, Nasdaq, Dollar Index
-
-# Daily report time (SGT)
+# Daily report time (SGT) — overridable at runtime via /settime, this is just the startup default
 TIMEZONE = "Asia/Singapore"
 DAILY_REPORT_TIME = "20:30"  # 8:30 PM SGT (end of US trading)
 
-# NewsAPI settings
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")  # Get from newsapi.org (free tier)
+# Portfolio totals are converted to this currency for the combined grand total
+HOME_CURRENCY = "SGD"
 
 # Logging
 import logging

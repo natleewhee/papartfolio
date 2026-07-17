@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Local database
+portfolio.db
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Logs
+*.log
