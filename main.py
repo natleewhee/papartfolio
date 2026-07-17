@@ -5,6 +5,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
 # Import handlers
@@ -27,8 +30,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class _HealthCheckHandler(BaseHTTPRequestHandler):
+    """Bare 200 OK so Render's Web Service port scan succeeds — this bot has
+    no real HTTP surface, it only long-polls Telegram."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # don't spam the log with a line per health-check hit
+
+def _start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _HealthCheckHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info(f"✅ Health-check HTTP server listening on port {port}")
+
 def main():
     """Start the bot."""
+
+    _start_health_check_server()
 
     # Initialize database
     init_db()
