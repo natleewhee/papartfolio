@@ -7,14 +7,14 @@ from portfolio_db import (
     add_holding, remove_holding, update_holding,
     get_all_holdings, get_holding, clear_all_holdings,
     get_setting, set_setting,
-    create_alert, get_active_alerts, deactivate_alert,
+    create_alert, get_active_alerts, deactivate_alert, find_active_alert, update_alert_threshold,
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
     fmt_money,
 )
 from telegram_handler import send_daily_report
-from config import TELEGRAM_USER_ID, TIMEZONE
+from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME
 import logging
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Multiple lines: bulk add/merge, one result per line
+    await update.message.reply_text(f"🔄 Processing {len(lines)} holdings...")
     results = []
     for line in lines:
         try:
@@ -148,6 +149,9 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def remove_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove confirmation"""
+    if not await check_user(update):
+        return ConversationHandler.END
+
     symbol = context.user_data.pop("pending_remove", None)
     if symbol and update.message.text.upper() == "YES":
         if remove_holding(symbol):
@@ -208,6 +212,9 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def update_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /update confirmation"""
+    if not await check_user(update):
+        return ConversationHandler.END
+
     pending = context.user_data.pop("pending_update", None)
     if pending and update.message.text.upper() == "YES":
         symbol, shares, avg_cost = pending
@@ -260,6 +267,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if metrics["failed_symbols"]:
             msg += f"⚠️ Price unavailable: {', '.join(metrics['failed_symbols'])}\n\n"
 
+        if metrics["fx_warnings"]:
+            warned = ", ".join(metrics["fx_warnings"])
+            msg += f"⚠️ No live FX rate for {warned} — assumed 1:1, total may be off\n\n"
+
         home_currency = metrics["home_currency"]
         emoji = "🟢" if metrics["daily_change_%"] >= 0 else "🔴"
         msg += (
@@ -292,6 +303,9 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle clear confirmation"""
+    if not await check_user(update):
+        return ConversationHandler.END
+
     if update.message.text.upper() == "YES":
         clear_all_holdings()
         await update.message.reply_text("✅ Portfolio cleared")
@@ -393,6 +407,23 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     # Sent with no formatting so a straight copy-paste back in works unmodified
     await update.message.reply_text("\n".join(lines))
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /settings — combined view of everything configurable via /privacy, /reportstyle, /settime"""
+    if not await check_user(update):
+        return
+
+    privacy = get_setting("privacy_mode", "0") == "1"
+    report_style = get_setting("report_style", "full")
+    report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
+
+    msg = (
+        "⚙️ *Current Settings*\n\n"
+        f"Privacy mode: {'ON' if privacy else 'OFF'} (/privacy)\n"
+        f"Report style: {report_style} (/reportstyle)\n"
+        f"Report time: {report_time} {TIMEZONE} (/settime)"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /privacy, /privacy on, /privacy off"""
@@ -502,6 +533,20 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         currency = get_currency_for_symbol(symbol)
+
+        # If an active alert already exists for this symbol+direction, edit it
+        # in place instead of creating a duplicate (no more unalert+realert)
+        existing = find_active_alert(symbol, direction)
+        if existing:
+            if update_alert_threshold(existing["id"], threshold):
+                await update.message.reply_text(
+                    f"✅ Alert #{existing['id']} updated: {symbol} {direction} "
+                    f"{fmt_money(threshold, currency)} (was {fmt_money(existing['threshold'], currency)})"
+                )
+            else:
+                await update.message.reply_text("❌ Error updating alert")
+            return
+
         alert_id = create_alert(symbol, direction, threshold)
         if alert_id:
             await update.message.reply_text(f"✅ Alert #{alert_id} set: {symbol} {direction} {fmt_money(threshold, currency)}")
@@ -584,10 +629,12 @@ whichever you actually hold)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
+  (re-running this on the same symbol+direction edits the threshold in place)
 /alerts — list active alerts
 /unalert ID — cancel an alert
 
 *— Settings —*
+/settings — see all current settings at a glance
 /privacy [on|off] — mask $ amounts (percentages still shown)
 /reportstyle [full|compact] — full holdings table, or summary only
 /settime HH:MM — change daily report time (24h, Asia/Singapore)

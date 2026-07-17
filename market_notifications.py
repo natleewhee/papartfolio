@@ -24,6 +24,10 @@ async def send_market_notification(market_key, event):
     privacy = get_setting("privacy_mode", "0") == "1"
     verb = "opened" if event == "open" else "closed"
     emoji = "🔔" if event == "open" else "🔕"
+    # At open this is really the gap vs. the prior close (today's session has
+    # barely started); at close it's the actual day's move. Label accordingly
+    # so it doesn't read as "today's move so far" at open.
+    change_label = "Gap from prior close" if event == "open" else "Change"
 
     subtotal_value = sum(h["current_value"] for h in holdings)
     subtotal_change = sum(h["daily_change_$"] for h in holdings)
@@ -34,7 +38,7 @@ async def send_market_notification(market_key, event):
     msg = (
         f"{emoji} *{market['label']} has {verb}*\n\n"
         f"Value: {fmt_money(subtotal_value, currency, privacy)}\n"
-        f"Change: {change_emoji} {fmt_money(subtotal_change, currency, privacy, show_sign=True)} "
+        f"{change_label}: {change_emoji} {fmt_money(subtotal_change, currency, privacy, show_sign=True)} "
         f"({subtotal_change_pct:+.2f}%)\n\n"
         f"```\n{format_holdings_table(holdings, privacy)}\n```"
     )

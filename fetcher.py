@@ -54,8 +54,6 @@ def fetch_stock_price(symbol):
             "price": data.get("c"),  # Current price
             "change": data.get("d"),  # Dollar change
             "change_pct": data.get("dp"),  # % change
-            "high_52w": data.get("h52"),
-            "low_52w": data.get("l52"),
         }
     except Exception as e:
         logger.error(f"❌ Error fetching price for {symbol}: {e}")
@@ -76,8 +74,6 @@ def fetch_sg_stock_price(symbol):
             "price": price,
             "change": change,
             "change_pct": change_pct,
-            "high_52w": None,
-            "low_52w": None,
         }
     except Exception as e:
         logger.error(f"❌ Error fetching SG price for {symbol}: {e}")

@@ -3,11 +3,16 @@ from portfolio_db import (
     get_all_holdings, save_daily_snapshot, save_portfolio_aggregate,
     get_earliest_aggregate_since,
 )
-from config import HOME_CURRENCY
+from config import HOME_CURRENCY, TIMEZONE
 from datetime import datetime, timedelta
+import pytz
 import logging
 
 logger = logging.getLogger(__name__)
+
+def _today():
+    """SGT-aware 'today', so snapshot dates stay correct regardless of the server's own timezone (Render runs UTC)."""
+    return datetime.now(pytz.timezone(TIMEZONE))
 
 CURRENCY_SYMBOLS = {"USD": "$", "SGD": "S$"}
 
@@ -59,6 +64,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
         "daily_change_%": 0.3,
         "home_currency": "SGD",
         "fx_rates": {"USD": 1.348},       # non-home currencies actually used, and their rate to HOME_CURRENCY
+        "fx_warnings": ["USD"],           # currencies where no live/cached FX rate was available (1:1 was assumed)
         "failed_symbols": ["XYZ"],
         "best_performer": {...} or None,
         "worst_performer": {...} or None,
@@ -92,6 +98,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
             "daily_change_%": 0,
             "home_currency": HOME_CURRENCY,
             "fx_rates": {},
+            "fx_warnings": [],
             "failed_symbols": [],
             "best_performer": None,
             "worst_performer": None,
@@ -103,6 +110,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
     total_cost_basis = 0  # HOME_CURRENCY
     failed_symbols = []
     fx_rates = {}
+    fx_warnings = []
 
     for holding in holdings:
         symbol = holding["symbol"]
@@ -128,7 +136,11 @@ def calculate_portfolio_metrics(save_snapshot=True):
         daily_change_dollar = (price_data["change"] or 0) * shares
         daily_change_pct = price_data["change_pct"] or 0
 
-        fx_rate = fetch_fx_rate(currency, HOME_CURRENCY) or 1.0
+        fx_rate = fetch_fx_rate(currency, HOME_CURRENCY)
+        if fx_rate is None:
+            fx_rate = 1.0
+            if currency not in fx_warnings:
+                fx_warnings.append(currency)
         if currency != HOME_CURRENCY:
             fx_rates[currency] = fx_rate
 
@@ -153,7 +165,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
 
         if save_snapshot:
             save_daily_snapshot(
-                datetime.now().strftime("%Y-%m-%d"),
+                _today().strftime("%Y-%m-%d"),
                 symbol,
                 current_price,
                 shares,
@@ -183,7 +195,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
 
     if save_snapshot:
         save_portfolio_aggregate(
-            datetime.now().strftime("%Y-%m-%d"),
+            _today().strftime("%Y-%m-%d"),
             total_value,
             total_cost_basis,
             portfolio_daily_change,
@@ -204,6 +216,7 @@ def calculate_portfolio_metrics(save_snapshot=True):
         "daily_change_%": round(portfolio_daily_change_pct, 2),
         "home_currency": HOME_CURRENCY,
         "fx_rates": fx_rates,
+        "fx_warnings": fx_warnings,
         "failed_symbols": failed_symbols,
         "best_performer": best_performer,
         "worst_performer": worst_performer,
@@ -228,7 +241,7 @@ def get_period_performance(days):
     Compare current portfolio value against the earliest snapshot on/after
     `days` ago. Returns None if there isn't a snapshot old enough yet.
     """
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cutoff = (_today() - timedelta(days=days)).strftime("%Y-%m-%d")
     start = get_earliest_aggregate_since(cutoff)
     if not start:
         return None

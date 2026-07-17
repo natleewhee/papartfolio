@@ -1,9 +1,10 @@
 import requests
 from telegram.ext import ContextTypes
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table
 from portfolio_db import get_setting
 from datetime import datetime
+import pytz
 import logging
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,8 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         emoji = "🟢" if metrics["daily_change_%"] >= 0 else "🔴"
 
         # Summary
-        report = f"📊 *{datetime.now().strftime('%d %b %Y')}* ({home_currency})\n\n"
+        today = datetime.now(pytz.timezone(TIMEZONE))
+        report = f"📊 *{today.strftime('%d %b %Y')}* ({home_currency})\n\n"
         report += (
             f"Total: {fmt_money(metrics['total_value'], home_currency, privacy)}\n"
             f"Today: {emoji} {fmt_money(metrics['daily_change_$'], home_currency, privacy, show_sign=True)} "
@@ -64,6 +66,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
 
         for currency, rate in metrics["fx_rates"].items():
             report += f"FX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}\n"
+
+        if metrics["fx_warnings"]:
+            warned = ", ".join(metrics["fx_warnings"])
+            report += f"⚠️ No live FX rate for {warned} — assumed 1:1, total may be off\n"
 
         if metrics["failed_symbols"]:
             report += f"⚠️ Price unavailable: {', '.join(metrics['failed_symbols'])}\n"

@@ -307,6 +307,39 @@ def get_active_alerts():
         logger.error(f"❌ Error fetching alerts: {e}")
         return []
 
+def find_active_alert(symbol, direction):
+    """Find an existing active alert for this symbol+direction, if any (so /alert can edit in place)."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM alerts WHERE active = 1 AND symbol = ? AND direction = ? LIMIT 1",
+            (symbol.upper(), direction)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return _rows_to_dicts(cursor, [row])[0] if row else None
+    except Exception as e:
+        logger.error(f"❌ Error finding alert for {symbol} {direction}: {e}")
+        return None
+
+def update_alert_threshold(alert_id, threshold):
+    """Update an existing active alert's threshold in place."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE alerts SET threshold = ? WHERE id = ? AND active = 1",
+            (threshold, alert_id)
+        )
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+    except Exception as e:
+        logger.error(f"❌ Error updating alert {alert_id}: {e}")
+        return False
+
 def deactivate_alert(alert_id):
     """Deactivate an alert (whether triggered or cancelled by the user)."""
     try:
