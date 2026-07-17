@@ -29,6 +29,26 @@ DAILY_REPORT_TIME = "20:30"  # 8:30 PM SGT (end of US trading)
 # Portfolio totals are converted to this currency for the combined grand total
 HOME_CURRENCY = "SGD"
 
+# Markets to ping open/close for — only fires if you actually hold something
+# in that currency. Times are in each market's own timezone (weekdays only,
+# no holiday calendar).
+MARKETS = {
+    "US": {
+        "label": "US Market (NYSE/NASDAQ)",
+        "currency": "USD",
+        "timezone": "America/New_York",
+        "open": (9, 30),
+        "close": (16, 0),
+    },
+    "SG": {
+        "label": "SG Market (SGX)",
+        "currency": "SGD",
+        "timezone": "Asia/Singapore",
+        "open": (9, 0),
+        "close": (17, 0),
+    },
+}
+
 # Logging
 import logging
 logging.basicConfig(

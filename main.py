@@ -20,8 +20,9 @@ from bot_handlers import (
 )
 from telegram_handler import send_daily_report
 from alerts import check_price_alerts
+from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
 from portfolio_db import init_db, get_setting
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME
+from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 
 import logging
 logging.basicConfig(
@@ -127,8 +128,27 @@ def main():
         replace_existing=True,
     )
 
+    # Market open/close pings — each job always runs, but silently no-ops if
+    # you hold nothing in that market's currency (see market_notifications.py)
+    market_jobs = [
+        ("US", "open", notify_us_open),
+        ("US", "close", notify_us_close),
+        ("SG", "open", notify_sg_open),
+        ("SG", "close", notify_sg_close),
+    ]
+    for market_key, event, func in market_jobs:
+        market = MARKETS[market_key]
+        hour, minute = market[event]
+        scheduler.add_job(
+            func,
+            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"])),
+            id=f"market_{market_key.lower()}_{event}",
+            name=f"{market['label']} {event}",
+            replace_existing=True,
+        )
+
     scheduler.start()
-    logger.info(f"✅ Scheduler started. Daily report at {report_time} {TIMEZONE} (weekdays), alert checks every 15 min")
+    logger.info(f"✅ Scheduler started. Daily report at {report_time} {TIMEZONE} (weekdays), alert checks every 15 min, market open/close pings enabled")
 
     # Start bot
     logger.info("🤖 Bot started. Press Ctrl+C to stop.")

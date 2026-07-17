@@ -579,6 +579,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *— Performance —*
 /sync — manually trigger the daily report
 /week / /month — value change over the trailing 7/30 days
+(you'll also get a ping at each market's open/close — US and/or SG,
+whichever you actually hold)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
