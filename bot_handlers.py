@@ -14,7 +14,8 @@ from portfolio import (
     fmt_money,
 )
 from telegram_handler import send_daily_report
-from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME
+from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -427,6 +428,39 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+def _to_sgt(market_tz_name, hour, minute):
+    """Convert a market-local HH:MM to today's equivalent SGT time (DST-correct)."""
+    market_now = datetime.now(pytz.timezone(market_tz_name))
+    dt = market_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return dt.astimezone(pytz.timezone(TIMEZONE)).strftime("%H:%M")
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /schedule — show all time-based notification times (daily report + market open/close)"""
+    if not await check_user(update):
+        return
+
+    report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
+    held_currencies = {(h.get("currency") or "USD") for h in get_all_holdings()}
+
+    lines = ["📅 *Notification Schedule*", "", f"Daily report: {report_time} {TIMEZONE}", ""]
+
+    for market in MARKETS.values():
+        tz = market["timezone"]
+        oh, om = market["open"]
+        ch, cm = market["close"]
+        held = "" if market["currency"] in held_currencies else " — none held, muted"
+        lines.append(f"*{market['label']}*{held}")
+        if tz == TIMEZONE:
+            lines.append(f"  Open {oh:02d}:{om:02d} · Close {ch:02d}:{cm:02d} SGT")
+        else:
+            lines.append(f"  Open {oh:02d}:{om:02d} → {_to_sgt(tz, oh, om)} SGT")
+            lines.append(f"  Close {ch:02d}:{cm:02d} → {_to_sgt(tz, ch, cm)} SGT")
+        lines.append("")
+
+    lines.append("_Weekdays only. Market pings fire only for markets you hold._")
+    lines.append("_(Price alerts are separate & event-based — see /alerts.)_")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /privacy, /privacy on, /privacy off"""
     if not await check_user(update):
@@ -637,6 +671,7 @@ whichever you actually hold)
 
 *— Settings —*
 /settings — see all current settings at a glance
+/schedule — when the daily report & market pings fire
 /privacy [on|off] — mask $ amounts (percentages still shown)
 /reportstyle [full|compact] — full holdings table, or summary only
 /settime HH:MM — change daily report time (24h, Asia/Singapore)

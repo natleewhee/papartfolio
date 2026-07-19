@@ -11,7 +11,7 @@ from datetime import datetime
 # Import handlers
 from bot_handlers import (
     cmd_add, cmd_remove, cmd_update, cmd_list, cmd_clear, cmd_sync,
-    cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_privacy, cmd_reportstyle,
+    cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_schedule, cmd_privacy, cmd_reportstyle,
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert,
     cmd_help, cmd_start, on_confirmation,
 )
@@ -72,6 +72,7 @@ def main():
     app.add_handler(CommandHandler("month", cmd_month))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("reportstyle", cmd_reportstyle))
     app.add_handler(CommandHandler("settime", cmd_settime))

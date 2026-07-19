@@ -26,10 +26,9 @@ async def send_market_notification(market_key, event):
         compact = get_setting("report_style", "full") == "compact"
         verb = "opened" if event == "open" else "closed"
         emoji = "🔔" if event == "open" else "🔕"
-        # At open this is really the gap vs. the prior close (today's session has
-        # barely started); at close it's the actual day's move. Label accordingly
-        # so it doesn't read as "today's move so far" at open.
-        change_label = "Gap from prior close" if event == "open" else "Change"
+        # At open the change is really the gap vs. the prior close (today's
+        # session has barely started); at close it's the actual day's move.
+        change_label = "Gap from prior close" if event == "open" else "Today"
 
         subtotal_value = sum(h["current_value"] for h in holdings)
         subtotal_change = sum(h["daily_change_$"] for h in holdings)
@@ -37,11 +36,19 @@ async def send_market_notification(market_key, event):
         subtotal_change_pct = (subtotal_change / prior_value * 100) if prior_value > 0 else 0
         change_emoji = "🟢" if subtotal_change >= 0 else "🔴"
 
+        # Total gain vs. what was invested (cost basis), scoped to this market
+        subtotal_cost = sum(h["cost_basis"] for h in holdings)
+        subtotal_gain = subtotal_value - subtotal_cost
+        subtotal_gain_pct = (subtotal_gain / subtotal_cost * 100) if subtotal_cost > 0 else 0
+        gain_emoji = "🟢" if subtotal_gain >= 0 else "🔴"
+
         msg = (
             f"{emoji} *{market['label']} has {verb}*\n\n"
             f"Value: {fmt_money(subtotal_value, currency, privacy)}\n"
             f"{change_label}: {change_emoji} {fmt_money(subtotal_change, currency, privacy, show_sign=True)} "
             f"({subtotal_change_pct:+.2f}%)\n"
+            f"Total: {gain_emoji} {fmt_money(subtotal_gain, currency, privacy, show_sign=True)} "
+            f"({subtotal_gain_pct:+.2f}%)\n"
         )
         if not compact:
             msg += "\n" + f"```\n{format_holdings_table(holdings, privacy)}\n```"
