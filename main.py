@@ -31,12 +31,21 @@ logger = logging.getLogger(__name__)
 
 class _HealthCheckHandler(BaseHTTPRequestHandler):
     """Bare 200 OK so Render's Web Service port scan succeeds — this bot has
-    no real HTTP surface, it only long-polls Telegram."""
+    no real HTTP surface, it only long-polls Telegram.
+
+    Handles HEAD as well as GET: Render's own health checks and most uptime
+    pingers (e.g. UptimeRobot) default to HEAD, and BaseHTTPRequestHandler
+    returns 501 Not Implemented for any method without a handler — which is
+    what was causing the repeated 501s in Render's activity log."""
 
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass  # don't spam the log with a line per health-check hit
