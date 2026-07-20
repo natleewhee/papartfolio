@@ -38,6 +38,16 @@ async def check_user(update: Update) -> bool:
         return False
     return True
 
+async def _delete_quietly(msg):
+    """Delete a transient 'working…' status message once its task is done, so
+    the chat is left with just the result. No-op if it's already gone."""
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass  # already deleted, too old, or races with the user — never surface this
+
 # ==================== COMMAND HANDLERS ====================
 
 def _parse_add_args(line: str):
@@ -102,16 +112,18 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         symbol, shares, avg_cost = parsed
-        await update.message.reply_text(f"🔍 Validating {symbol}...")
+        status = await update.message.reply_text(f"🔍 Validating {symbol}...")
         try:
             await update.message.reply_text(_apply_add(symbol, shares, avg_cost))
         except Exception as e:
             logger.error(f"Error in /add: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
+        finally:
+            await _delete_quietly(status)
         return
 
     # Multiple lines: bulk add/merge, one result per line
-    await update.message.reply_text(f"🔄 Processing {len(lines)} holdings...")
+    status = await update.message.reply_text(f"🔄 Processing {len(lines)} holdings...")
     results = []
     for line in lines:
         try:
@@ -128,6 +140,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results.append(f"❌ Error on line: {line}")
 
     await update.message.reply_text("\n".join(results))
+    await _delete_quietly(status)
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove SYMBOL (asks for confirmation before deleting)"""
@@ -315,17 +328,20 @@ async def on_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ Error: {e}")
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /sync (manually trigger daily report)"""
+    """Handle /sync (manually trigger daily report). The 'generating' status is a
+    throwaway spinner — deleted once the report lands — and there's no 'sent'
+    confirmation, so the chat is left with just the report itself."""
     if not await check_user(update):
         return
 
+    status = await update.message.reply_text("🔄 Generating daily report...")
     try:
-        await update.message.reply_text("🔄 Generating daily report...")
         await send_daily_report(context)
-        await update.message.reply_text("✅ Report sent")
     except Exception as e:
         logger.error(f"Error in /sync: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        await _delete_quietly(status)
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /price SYMBOL — quick lookup without adding to the portfolio"""
@@ -673,15 +689,17 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = parts[1].upper()
-    await update.message.reply_text(f"🔍 Validating {symbol}...")
+    status = await update.message.reply_text(f"🔍 Validating {symbol}...")
     if not validate_symbol(symbol):
         await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
+        await _delete_quietly(status)
         return
 
     if add_to_watchlist(symbol):
         await update.message.reply_text(f"👁️ Added {symbol} to your watchlist")
     else:
         await update.message.reply_text(f"ℹ️ {symbol} is already on your watchlist")
+    await _delete_quietly(status)
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /unwatch SYMBOL — stop tracking a watchlist stock"""
@@ -711,7 +729,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("🔄 Computing support levels...")
+    status = await update.message.reply_text("🔄 Computing support levels...")
     lines = ["👁️ *Watchlist — support levels*", ""]
     for w in watched:
         try:
@@ -722,6 +740,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _delete_quietly(status)
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /support [SYMBOL] — support levels for one stock, or all tracked stocks"""
@@ -733,13 +752,14 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /support SYMBOL — detailed single-stock view
     if len(parts) == 2:
         symbol = parts[1].upper()
-        await update.message.reply_text(f"🔄 Computing support for {symbol}...")
+        status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
         currency = get_currency_for_symbol(symbol)
         data = compute_support_levels(symbol)
         if not data:
             await update.message.reply_text(
                 f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
             )
+            await _delete_quietly(status)
             return
 
         def leg(sl):
@@ -755,6 +775,7 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "_(%) = the drop from today's price down to that support._"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+        await _delete_quietly(status)
         return
 
     # /support — all tracked stocks (holdings + watchlist)
@@ -765,7 +786,7 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("🔄 Computing support levels...")
+    status = await update.message.reply_text("🔄 Computing support levels...")
     lines = ["📉 *Support Levels*", ""]
     for symbol in symbols:
         try:
@@ -776,6 +797,7 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _delete_quietly(status)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
