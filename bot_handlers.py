@@ -14,7 +14,10 @@ from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
     fmt_money,
 )
-from support import compute_support_levels, format_support_compact
+from support import (
+    compute_support_levels, compute_support_levels_bulk, compute_resistance_levels,
+    format_support_compact, format_resistance_compact,
+)
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -37,6 +40,16 @@ async def check_user(update: Update) -> bool:
         await update.message.reply_text("❌ Unauthorized")
         return False
     return True
+
+async def _delete_quietly(msg):
+    """Delete a transient 'working…' status message once its task is done, so
+    the chat is left with just the result. No-op if it's already gone."""
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass  # already deleted, too old, or races with the user — never surface this
 
 # ==================== COMMAND HANDLERS ====================
 
@@ -102,16 +115,18 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         symbol, shares, avg_cost = parsed
-        await update.message.reply_text(f"🔍 Validating {symbol}...")
+        status = await update.message.reply_text(f"🔍 Validating {symbol}...")
         try:
             await update.message.reply_text(_apply_add(symbol, shares, avg_cost))
         except Exception as e:
             logger.error(f"Error in /add: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
+        finally:
+            await _delete_quietly(status)
         return
 
     # Multiple lines: bulk add/merge, one result per line
-    await update.message.reply_text(f"🔄 Processing {len(lines)} holdings...")
+    status = await update.message.reply_text(f"🔄 Processing {len(lines)} holdings...")
     results = []
     for line in lines:
         try:
@@ -128,6 +143,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results.append(f"❌ Error on line: {line}")
 
     await update.message.reply_text("\n".join(results))
+    await _delete_quietly(status)
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove SYMBOL (asks for confirmation before deleting)"""
@@ -315,17 +331,20 @@ async def on_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ Error: {e}")
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /sync (manually trigger daily report)"""
+    """Handle /sync (manually trigger daily report). The 'generating' status is a
+    throwaway spinner — deleted once the report lands — and there's no 'sent'
+    confirmation, so the chat is left with just the report itself."""
     if not await check_user(update):
         return
 
+    status = await update.message.reply_text("🔄 Generating daily report...")
     try:
-        await update.message.reply_text("🔄 Generating daily report...")
         await send_daily_report(context)
-        await update.message.reply_text("✅ Report sent")
     except Exception as e:
         logger.error(f"Error in /sync: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        await _delete_quietly(status)
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /price SYMBOL — quick lookup without adding to the portfolio"""
@@ -610,13 +629,21 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🔔 *Active Alerts*\n\n"
     for a in alerts:
         currency = get_currency_for_symbol(a["symbol"])
-        line = f"#{a['id']}: {a['symbol']} {a['direction']} {fmt_money(a['threshold'], currency)}"
 
-        price_data = get_price(a["symbol"])
-        if price_data and price_data["price"]:
-            price = price_data["price"]
-            gap_pct = abs(price - a["threshold"]) / price * 100 if price else 0
-            line += f" — currently {fmt_money(price, currency)}, {gap_pct:.1f}% away"
+        if a["direction"] == "near_support":
+            line = f"#{a['id']}: {a['symbol']} near support (within {a['threshold']:.1f}%)"
+            data = compute_support_levels(a["symbol"])
+            if data:
+                dists = [sl["distance_pct"] for sl in (data["short_term"], data["mid_term"]) if sl]
+                if dists:
+                    line += f" — currently {min(dists):.1f}% away"
+        else:
+            line = f"#{a['id']}: {a['symbol']} {a['direction']} {fmt_money(a['threshold'], currency)}"
+            price_data = get_price(a["symbol"])
+            if price_data and price_data["price"]:
+                price = price_data["price"]
+                gap_pct = abs(price - a["threshold"]) / price * 100 if price else 0
+                line += f" — currently {fmt_money(price, currency)}, {gap_pct:.1f}% away"
 
         msg += line + "\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -642,6 +669,57 @@ async def cmd_unalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Alert #{alert_id} not found or already inactive")
 
+async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /alertsupport SYMBOL [PCT] — notify when price comes within PCT%
+    of a short- or mid-term support level (default 5%)"""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+    if len(parts) not in (2, 3):
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /alertsupport SYMBOL [PCT]\n"
+            "Example: /alertsupport AAPL 5  (default 5%)"
+        )
+        return
+
+    try:
+        symbol = parts[1].upper()
+        pct = float(parts[2]) if len(parts) == 3 else 5.0
+        if pct <= 0:
+            await update.message.reply_text("❌ Percent must be > 0")
+            return
+
+        if not validate_symbol(symbol):
+            await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
+            return
+
+        # If an active support alert already exists for this symbol, edit its
+        # percent in place instead of creating a duplicate
+        existing = find_active_alert(symbol, "near_support")
+        if existing:
+            if update_alert_threshold(existing["id"], pct):
+                await update.message.reply_text(
+                    f"✅ Alert #{existing['id']} updated: {symbol} within {pct:.1f}% of support "
+                    f"(was {existing['threshold']:.1f}%)"
+                )
+            else:
+                await update.message.reply_text("❌ Error updating alert")
+            return
+
+        alert_id = create_alert(symbol, "near_support", pct)
+        if alert_id:
+            await update.message.reply_text(f"✅ Alert #{alert_id} set: {symbol} within {pct:.1f}% of support")
+        else:
+            await update.message.reply_text("❌ Error creating alert")
+
+    except ValueError:
+        await update.message.reply_text("❌ Percent must be a number")
+    except Exception as e:
+        logger.error(f"Error in /alertsupport: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
 def _tracked_symbols():
     """The de-duplicated set of symbols to report support for: everything you
     hold, plus everything on the watchlist. Preserves a stable sorted order."""
@@ -649,14 +727,19 @@ def _tracked_symbols():
     watched = [w["symbol"] for w in get_watchlist()]
     return sorted(set(held) | set(watched))
 
-def _support_line(symbol, current_price=None):
-    """Compute + format one compact support line for a symbol, or a graceful
-    fallback string if history/price is unavailable."""
-    currency = get_currency_for_symbol(symbol)
-    data = compute_support_levels(symbol, current_price)
-    if not data:
-        return f"*{symbol}*  — support data unavailable"
-    return format_support_compact(data, currency, fmt_money)
+def _format_support_lines(symbols):
+    """Compute + format compact support lines for many symbols concurrently,
+    each falling back to a friendly message if data is unavailable."""
+    results = compute_support_levels_bulk((s, None) for s in symbols)
+    lines = []
+    for s in symbols:
+        data = results.get(s)
+        if not data:
+            lines.append(f"*{s}*  — support data unavailable")
+        else:
+            currency = get_currency_for_symbol(s)
+            lines.append(format_support_compact(data, currency, fmt_money))
+    return lines
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /watch SYMBOL — track a stock's support levels without holding it"""
@@ -673,15 +756,17 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = parts[1].upper()
-    await update.message.reply_text(f"🔍 Validating {symbol}...")
+    status = await update.message.reply_text(f"🔍 Validating {symbol}...")
     if not validate_symbol(symbol):
         await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
+        await _delete_quietly(status)
         return
 
     if add_to_watchlist(symbol):
         await update.message.reply_text(f"👁️ Added {symbol} to your watchlist")
     else:
         await update.message.reply_text(f"ℹ️ {symbol} is already on your watchlist")
+    await _delete_quietly(status)
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /unwatch SYMBOL — stop tracking a watchlist stock"""
@@ -711,17 +796,13 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("🔄 Computing support levels...")
+    status = await update.message.reply_text("🔄 Computing support levels...")
     lines = ["👁️ *Watchlist — support levels*", ""]
-    for w in watched:
-        try:
-            lines.append(_support_line(w["symbol"]))
-        except Exception as e:
-            logger.error(f"Error computing support for {w['symbol']}: {e}")
-            lines.append(f"*{w['symbol']}*  — error computing support")
+    lines.extend(_format_support_lines([w["symbol"] for w in watched]))
     lines.append("")
     lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _delete_quietly(status)
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /support [SYMBOL] — support levels for one stock, or all tracked stocks"""
@@ -733,13 +814,14 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /support SYMBOL — detailed single-stock view
     if len(parts) == 2:
         symbol = parts[1].upper()
-        await update.message.reply_text(f"🔄 Computing support for {symbol}...")
+        status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
         currency = get_currency_for_symbol(symbol)
         data = compute_support_levels(symbol)
         if not data:
             await update.message.reply_text(
                 f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
             )
+            await _delete_quietly(status)
             return
 
         def leg(sl):
@@ -755,6 +837,7 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "_(%) = the drop from today's price down to that support._"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+        await _delete_quietly(status)
         return
 
     # /support — all tracked stocks (holdings + watchlist)
@@ -765,17 +848,53 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("🔄 Computing support levels...")
+    status = await update.message.reply_text("🔄 Computing support levels...")
     lines = ["📉 *Support Levels*", ""]
-    for symbol in symbols:
-        try:
-            lines.append(_support_line(symbol))
-        except Exception as e:
-            logger.error(f"Error computing support for {symbol}: {e}")
-            lines.append(f"*{symbol}*  — error computing support")
+    lines.extend(_format_support_lines(symbols))
     lines.append("")
     lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _delete_quietly(status)
+
+async def cmd_resistance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /resistance SYMBOL — nearest short & mid-term resistance and the rise needed to reach it"""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /resistance SYMBOL\n"
+            "Example: /resistance AAPL"
+        )
+        return
+
+    symbol = parts[1].upper()
+    status = await update.message.reply_text(f"🔄 Computing resistance for {symbol}...")
+    currency = get_currency_for_symbol(symbol)
+    data = compute_resistance_levels(symbol)
+    if not data:
+        await update.message.reply_text(
+            f"❌ Couldn't compute resistance for {symbol} — not enough price history or invalid ticker."
+        )
+        await _delete_quietly(status)
+        return
+
+    def leg(sl):
+        if not sl:
+            return "n/a (price near its own high)"
+        return f"{fmt_money(sl['level'], currency)} (+{sl['distance_pct']:.1f}%) — {sl['basis']}"
+
+    msg = (
+        f"📈 *{data['symbol']} — Resistance Levels*\n\n"
+        f"Price: {fmt_money(data['current_price'], currency)}\n"
+        f"Short-term: {leg(data['short_term'])}\n"
+        f"Mid-term: {leg(data['mid_term'])}\n\n"
+        "_(%) = the rise needed from today's price up to that resistance._"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    await _delete_quietly(status)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
@@ -800,9 +919,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 (you'll also get a ping at each market's open/close — US and/or SG,
 whichever you actually hold)
 
-*— Support Levels —*
+*— Support & Resistance —*
 /support [SYMBOL] — short & mid-term support + how far price is above it
   (no symbol = all your holdings and watchlist stocks)
+/resistance SYMBOL — short & mid-term resistance + rise needed to reach it
 /watch SYMBOL — track a stock's support levels without holding it
 /unwatch SYMBOL — stop tracking a watchlist stock
 /watchlist — watched stocks with their support levels
@@ -810,6 +930,8 @@ whichever you actually hold)
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
   (re-running this on the same symbol+direction edits the threshold in place)
+/alertsupport SYMBOL [PCT] — notify when price comes within PCT% of support
+  (default 5%; re-running on the same symbol edits the percent in place)
 /alerts — list active alerts
 /unalert ID — cancel an alert
 

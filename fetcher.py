@@ -1,6 +1,7 @@
 import requests
 import time
 import yfinance
+from concurrent.futures import ThreadPoolExecutor
 from config import FINNHUB_API_KEY
 import logging
 
@@ -96,6 +97,29 @@ def get_price(symbol):
     if is_sg_ticker(symbol):
         return fetch_sg_stock_price(symbol)
     return fetch_stock_price(symbol)
+
+def get_prices_bulk(symbols):
+    """Fetch quotes for many symbols concurrently — each call is a blocking
+    network request (Finnhub or yfinance), so looping sequentially scales
+    linearly with portfolio/watchlist size for no reason.
+
+    Returns {symbol: price_data_or_None}, matching get_price()'s own return
+    shape per symbol. A per-symbol failure logs and resolves to None rather
+    than failing the whole batch.
+    """
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+
+    def _one(symbol):
+        try:
+            return symbol, get_price(symbol)
+        except Exception as e:
+            logger.error(f"❌ Error fetching price for {symbol}: {e}")
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as pool:
+        return dict(pool.map(_one, symbols))
 
 def validate_symbol(symbol):
     """Dispatch ticker validation the same way as get_price."""

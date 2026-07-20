@@ -12,8 +12,8 @@ from datetime import datetime
 from bot_handlers import (
     cmd_add, cmd_remove, cmd_update, cmd_list, cmd_clear, cmd_sync,
     cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_schedule, cmd_privacy, cmd_reportstyle,
-    cmd_settime, cmd_alert, cmd_alerts, cmd_unalert,
-    cmd_support, cmd_watch, cmd_unwatch, cmd_watchlist,
+    cmd_settime, cmd_alert, cmd_alerts, cmd_unalert, cmd_alertsupport,
+    cmd_support, cmd_resistance, cmd_watch, cmd_unwatch, cmd_watchlist,
     cmd_help, cmd_start, on_confirmation,
 )
 from telegram_handler import send_daily_report
@@ -31,12 +31,21 @@ logger = logging.getLogger(__name__)
 
 class _HealthCheckHandler(BaseHTTPRequestHandler):
     """Bare 200 OK so Render's Web Service port scan succeeds — this bot has
-    no real HTTP surface, it only long-polls Telegram."""
+    no real HTTP surface, it only long-polls Telegram.
+
+    Handles HEAD as well as GET: Render's own health checks and most uptime
+    pingers (e.g. UptimeRobot) default to HEAD, and BaseHTTPRequestHandler
+    returns 501 Not Implemented for any method without a handler — which is
+    what was causing the repeated 501s in Render's activity log."""
 
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass  # don't spam the log with a line per health-check hit
@@ -80,7 +89,9 @@ def main():
     app.add_handler(CommandHandler("alert", cmd_alert))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("unalert", cmd_unalert))
+    app.add_handler(CommandHandler("alertsupport", cmd_alertsupport))
     app.add_handler(CommandHandler("support", cmd_support))
+    app.add_handler(CommandHandler("resistance", cmd_resistance))
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))

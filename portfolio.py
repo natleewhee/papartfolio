@@ -1,4 +1,4 @@
-from fetcher import get_price, fetch_fx_rate
+from fetcher import fetch_fx_rate, get_prices_bulk
 from portfolio_db import (
     get_all_holdings, save_daily_snapshot, save_portfolio_aggregate,
     get_earliest_aggregate_since,
@@ -112,14 +112,18 @@ def calculate_portfolio_metrics(save_snapshot=True):
     fx_rates = {}
     fx_warnings = []
 
+    # Fetch every holding's price concurrently — each is a blocking network
+    # call (Finnhub or yfinance, routed per symbol's market), so sequential
+    # fetching scaled linearly with portfolio size for no reason.
+    price_data_by_symbol = get_prices_bulk(h["symbol"] for h in holdings)
+
     for holding in holdings:
         symbol = holding["symbol"]
         shares = holding["shares"]
         avg_cost = holding["avg_cost"]
         currency = holding.get("currency") or "USD"
 
-        # Fetch current price (routed to the right data source for this symbol's market)
-        price_data = get_price(symbol)
+        price_data = price_data_by_symbol.get(symbol)
         if not price_data or not price_data["price"]:
             logger.warning(f"⚠️ Could not fetch price for {symbol}")
             failed_symbols.append(symbol)
