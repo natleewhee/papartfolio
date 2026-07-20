@@ -78,6 +78,15 @@ def init_db():
         )
     """)
 
+    # Watchlist — stocks tracked for support levels without necessarily holding them
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
 
     # Migration: currency column (added after the original schema). Existing
@@ -355,4 +364,66 @@ def deactivate_alert(alert_id):
         return updated
     except Exception as e:
         logger.error(f"❌ Error deactivating alert {alert_id}: {e}")
+        return False
+
+# ==================== WATCHLIST ====================
+
+def add_to_watchlist(symbol):
+    """Add a symbol to the watchlist. Returns True if added, False if it was
+    already there (or on error)."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO watchlist (symbol) VALUES (?)", (symbol.upper(),))
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Added {symbol} to watchlist")
+        return True
+    except ValueError as e:
+        if "UNIQUE constraint failed" in str(e):
+            return False
+        logger.error(f"❌ Error adding {symbol} to watchlist: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error adding {symbol} to watchlist: {e}")
+        return False
+
+def remove_from_watchlist(symbol):
+    """Remove a symbol from the watchlist. Returns True if a row was deleted."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted > 0
+    except Exception as e:
+        logger.error(f"❌ Error removing {symbol} from watchlist: {e}")
+        return False
+
+def get_watchlist():
+    """Fetch all watchlist symbols (list of dicts), ordered by symbol."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM watchlist ORDER BY symbol")
+        rows = _rows_to_dicts(cursor, cursor.fetchall())
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"❌ Error fetching watchlist: {e}")
+        return []
+
+def is_watched(symbol):
+    """Whether a symbol is already on the watchlist."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"❌ Error checking watchlist for {symbol}: {e}")
         return False

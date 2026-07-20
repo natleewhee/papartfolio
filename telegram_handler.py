@@ -2,7 +2,9 @@ import requests
 from telegram.ext import ContextTypes
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
-from portfolio_db import get_setting
+from portfolio_db import get_setting, get_watchlist
+from fetcher import get_price, get_currency_for_symbol
+from support import compute_support_levels, format_support_compact
 from datetime import datetime
 import pytz
 import logging
@@ -30,6 +32,36 @@ async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
     except Exception as e:
         logger.error(f"❌ Error sending message: {e}")
         return False
+
+def _build_support_section(metrics):
+    """Compact per-stock support block for the daily report, covering every held
+    stock plus everything on the watchlist. Support levels are public market
+    prices (not portfolio values), so they're shown even in privacy mode.
+    Returns "" if there's nothing to report."""
+    held_price = {h["symbol"]: h["current_price"] for h in metrics["holdings"]}
+    watched = [w["symbol"] for w in get_watchlist()]
+    symbols = sorted(set(held_price) | set(watched))
+    if not symbols:
+        return ""
+
+    lines = ["", "📉 *Support Levels*"]
+    for symbol in symbols:
+        try:
+            current = held_price.get(symbol)
+            if current is None:  # watchlist-only symbol — fetch a live quote
+                pd = get_price(symbol)
+                current = pd["price"] if pd and pd.get("price") else None
+            data = compute_support_levels(symbol, current)
+            if not data:
+                lines.append(f"*{symbol}*  — support data unavailable")
+            else:
+                currency = get_currency_for_symbol(symbol)
+                lines.append(format_support_compact(data, currency, fmt_money))
+        except Exception as e:
+            logger.error(f"❌ Error computing support for {symbol}: {e}")
+            lines.append(f"*{symbol}*  — error computing support")
+    lines.append("_ST=short · MT=mid · (%) = drop from price to that support_")
+    return "\n".join(lines)
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""
@@ -81,6 +113,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
 
         if not compact:
             report += "\n" + f"```\n{format_holdings_table(metrics['holdings'], privacy)}\n```"
+
+        support_section = _build_support_section(metrics)
+        if support_section:
+            report += "\n" + support_section
 
         await send_telegram_message(report)
         logger.info("✅ Daily report sent")

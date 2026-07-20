@@ -8,11 +8,13 @@ from portfolio_db import (
     get_all_holdings, get_holding, clear_all_holdings,
     get_setting, set_setting,
     create_alert, get_active_alerts, deactivate_alert, find_active_alert, update_alert_threshold,
+    add_to_watchlist, remove_from_watchlist, get_watchlist, is_watched,
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
     fmt_money,
 )
+from support import compute_support_levels, format_support_compact
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -640,6 +642,141 @@ async def cmd_unalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Alert #{alert_id} not found or already inactive")
 
+def _tracked_symbols():
+    """The de-duplicated set of symbols to report support for: everything you
+    hold, plus everything on the watchlist. Preserves a stable sorted order."""
+    held = [h["symbol"] for h in get_all_holdings()]
+    watched = [w["symbol"] for w in get_watchlist()]
+    return sorted(set(held) | set(watched))
+
+def _support_line(symbol, current_price=None):
+    """Compute + format one compact support line for a symbol, or a graceful
+    fallback string if history/price is unavailable."""
+    currency = get_currency_for_symbol(symbol)
+    data = compute_support_levels(symbol, current_price)
+    if not data:
+        return f"*{symbol}*  — support data unavailable"
+    return format_support_compact(data, currency, fmt_money)
+
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /watch SYMBOL — track a stock's support levels without holding it"""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /watch SYMBOL\n"
+            "Example: /watch AAPL (SG stocks: /watch D05.SI)"
+        )
+        return
+
+    symbol = parts[1].upper()
+    await update.message.reply_text(f"🔍 Validating {symbol}...")
+    if not validate_symbol(symbol):
+        await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
+        return
+
+    if add_to_watchlist(symbol):
+        await update.message.reply_text(f"👁️ Added {symbol} to your watchlist")
+    else:
+        await update.message.reply_text(f"ℹ️ {symbol} is already on your watchlist")
+
+async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /unwatch SYMBOL — stop tracking a watchlist stock"""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+    if len(parts) != 2:
+        await update.message.reply_text("❌ Usage: /unwatch SYMBOL\nSee your watchlist with /watchlist")
+        return
+
+    symbol = parts[1].upper()
+    if remove_from_watchlist(symbol):
+        await update.message.reply_text(f"✅ Removed {symbol} from your watchlist")
+    else:
+        await update.message.reply_text(f"❌ {symbol} is not on your watchlist")
+
+async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /watchlist — list watched stocks with their support levels"""
+    if not await check_user(update):
+        return
+
+    watched = get_watchlist()
+    if not watched:
+        await update.message.reply_text(
+            "📭 Watchlist is empty. Use /watch SYMBOL to track a stock's support levels."
+        )
+        return
+
+    await update.message.reply_text("🔄 Computing support levels...")
+    lines = ["👁️ *Watchlist — support levels*", ""]
+    for w in watched:
+        try:
+            lines.append(_support_line(w["symbol"]))
+        except Exception as e:
+            logger.error(f"Error computing support for {w['symbol']}: {e}")
+            lines.append(f"*{w['symbol']}*  — error computing support")
+    lines.append("")
+    lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /support [SYMBOL] — support levels for one stock, or all tracked stocks"""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+
+    # /support SYMBOL — detailed single-stock view
+    if len(parts) == 2:
+        symbol = parts[1].upper()
+        await update.message.reply_text(f"🔄 Computing support for {symbol}...")
+        currency = get_currency_for_symbol(symbol)
+        data = compute_support_levels(symbol)
+        if not data:
+            await update.message.reply_text(
+                f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
+            )
+            return
+
+        def leg(sl):
+            if not sl:
+                return "n/a (price near its own low)"
+            return f"{fmt_money(sl['level'], currency)} (-{sl['distance_pct']:.1f}%) — {sl['basis']}"
+
+        msg = (
+            f"📉 *{data['symbol']} — Support Levels*\n\n"
+            f"Price: {fmt_money(data['current_price'], currency)}\n"
+            f"Short-term: {leg(data['short_term'])}\n"
+            f"Mid-term: {leg(data['mid_term'])}\n\n"
+            "_(%) = the drop from today's price down to that support._"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    # /support — all tracked stocks (holdings + watchlist)
+    symbols = _tracked_symbols()
+    if not symbols:
+        await update.message.reply_text(
+            "📭 Nothing to show. Add holdings with /add or track stocks with /watch."
+        )
+        return
+
+    await update.message.reply_text("🔄 Computing support levels...")
+    lines = ["📉 *Support Levels*", ""]
+    for symbol in symbols:
+        try:
+            lines.append(_support_line(symbol))
+        except Exception as e:
+            logger.error(f"Error computing support for {symbol}: {e}")
+            lines.append(f"*{symbol}*  — error computing support")
+    lines.append("")
+    lines.append("_ST=short-term · MT=mid-term · (%) = drop from price to that support._")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
     if not await check_user(update):
@@ -662,6 +799,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /week / /month — value change over the trailing 7/30 days
 (you'll also get a ping at each market's open/close — US and/or SG,
 whichever you actually hold)
+
+*— Support Levels —*
+/support [SYMBOL] — short & mid-term support + how far price is above it
+  (no symbol = all your holdings and watchlist stocks)
+/watch SYMBOL — track a stock's support levels without holding it
+/unwatch SYMBOL — stop tracking a watchlist stock
+/watchlist — watched stocks with their support levels
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
