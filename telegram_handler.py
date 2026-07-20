@@ -3,8 +3,8 @@ from telegram.ext import ContextTypes
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
-from fetcher import get_price, get_currency_for_symbol
-from support import compute_support_levels, format_support_compact
+from fetcher import get_currency_for_symbol, get_prices_bulk
+from support import compute_support_levels_bulk, format_support_compact
 from datetime import datetime
 import pytz
 import logging
@@ -44,22 +44,26 @@ def _build_support_section(metrics):
     if not symbols:
         return ""
 
+    # Watchlist-only symbols have no held price yet — fetch a live quote for
+    # those (concurrently) before computing support, so the report reflects
+    # today's actual price rather than yesterday's close.
+    missing = [s for s in symbols if held_price.get(s) is None]
+    resolved_price = dict(held_price)
+    if missing:
+        quotes = get_prices_bulk(missing)
+        for s, pd in quotes.items():
+            resolved_price[s] = pd["price"] if pd and pd.get("price") else None
+
+    results = compute_support_levels_bulk((s, resolved_price.get(s)) for s in symbols)
+
     lines = ["", "📉 *Support Levels*"]
     for symbol in symbols:
-        try:
-            current = held_price.get(symbol)
-            if current is None:  # watchlist-only symbol — fetch a live quote
-                pd = get_price(symbol)
-                current = pd["price"] if pd and pd.get("price") else None
-            data = compute_support_levels(symbol, current)
-            if not data:
-                lines.append(f"*{symbol}*  — support data unavailable")
-            else:
-                currency = get_currency_for_symbol(symbol)
-                lines.append(format_support_compact(data, currency, fmt_money))
-        except Exception as e:
-            logger.error(f"❌ Error computing support for {symbol}: {e}")
-            lines.append(f"*{symbol}*  — error computing support")
+        data = results.get(symbol)
+        if not data:
+            lines.append(f"*{symbol}*  — support data unavailable")
+        else:
+            currency = get_currency_for_symbol(symbol)
+            lines.append(format_support_compact(data, currency, fmt_money))
     lines.append("_ST=short · MT=mid · (%) = drop from price to that support_")
     return "\n".join(lines)
 
