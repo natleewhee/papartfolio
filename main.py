@@ -5,6 +5,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 import pytz
 import os
 import threading
+import time
+import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
@@ -56,10 +58,42 @@ def _start_health_check_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     logger.info(f"✅ Health-check HTTP server listening on port {port}")
 
+KEEP_ALIVE_INTERVAL_SECONDS = 10 * 60  # comfortably under Render's ~15-min idle window
+
+def _start_keep_alive_pinger():
+    """Render's free tier idles a Web Service after ~15 min without *inbound*
+    HTTP traffic — fatal for this bot, whose Telegram traffic is all outbound
+    long-polling. Instead of depending on an external pinger (UptimeRobot
+    et al.), periodically GET our own public URL: the request goes out to the
+    internet and back in through Render's proxy, so it counts as real inbound
+    traffic and keeps the service awake.
+
+    RENDER_EXTERNAL_URL is injected automatically by Render; when it's absent
+    (local runs, other hosts) the pinger stays off. A failed ping is only
+    logged — the loop must never die, since it's what keeps the lights on."""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        logger.info("ℹ️ RENDER_EXTERNAL_URL not set — self keep-alive pinger disabled")
+        return
+
+    def _ping_loop():
+        while True:
+            time.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
+            try:
+                response = requests.get(url, timeout=30)
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Keep-alive ping got HTTP {response.status_code}")
+            except Exception as e:
+                logger.warning(f"⚠️ Keep-alive ping failed: {e}")
+
+    threading.Thread(target=_ping_loop, daemon=True).start()
+    logger.info(f"✅ Self keep-alive pinger active: GET {url} every {KEEP_ALIVE_INTERVAL_SECONDS // 60} min")
+
 def main():
     """Start the bot."""
 
     _start_health_check_server()
+    _start_keep_alive_pinger()
 
     # Initialize database
     init_db()
