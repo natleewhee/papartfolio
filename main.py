@@ -170,9 +170,17 @@ def main():
     for market_key, event, func in market_jobs:
         market = MARKETS[market_key]
         hour, minute = market[event]
+        # Open notifications fire 30s after the bell — quote feeds can lag
+        # the actual opening print by a few seconds, so fetching at :00 sharp
+        # risked reporting a stale/misleading first move (e.g. showing a
+        # small gain when the stock actually opened down several percent).
+        second = 30 if event == "open" else 0
         scheduler.add_job(
             func,
-            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"])),
+            CronTrigger(
+                hour=hour, minute=minute, second=second,
+                day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"]),
+            ),
             id=f"market_{market_key.lower()}_{event}",
             name=f"{market['label']} {event}",
             replace_existing=True,

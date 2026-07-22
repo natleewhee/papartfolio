@@ -34,8 +34,11 @@ def format_holdings_table(holdings, privacy=False):
 
     Columns read left to right as: identity, today's per-share price, what you
     originally put in (cost basis), what it's worth now, overall gain, then
-    today's move."""
-    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'GAIN%':>8}{'%CHG':>8}{'TODAY':>10}"
+    today's % move. (The $ amount for today's move is deliberately left out —
+    %CHG alone conveys direction and size, and the combined row was wide
+    enough to overflow narrower phone screens, which wrap instead of
+    scrolling a Telegram code block.)"""
+    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'GAIN%':>8}{'%CHG':>8}"
     lines = [header, "-" * len(header)]
     for h in holdings:
         currency = h["currency"]
@@ -44,9 +47,8 @@ def format_holdings_table(holdings, privacy=False):
         value_str = fmt_money(h["current_value"], currency, privacy, decimals=0)
         gain_str = "•••" if privacy else f"{h['unrealized_gain_pct']:+.1f}%"
         pct_str = "•••" if privacy else f"{h['daily_change_%']:+.1f}%"
-        chg_str = fmt_money(h["daily_change_$"], currency, privacy, show_sign=True, decimals=0)
         lines.append(
-            f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{gain_str:>8}{pct_str:>8}{chg_str:>10}"
+            f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{gain_str:>8}{pct_str:>8}"
         )
     return "\n".join(lines)
 

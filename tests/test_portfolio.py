@@ -33,14 +33,15 @@ def test_fmt_money_decimals():
 def test_format_holdings_table_contains_header_and_rows():
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0},
         {"symbol": "MSFT", "currency": "USD", "current_price": 190.0, "cost_basis": 1000,
-         "current_value": 950, "unrealized_gain_pct": -5.0, "daily_change_%": -5.0, "daily_change_$": -50},
+         "current_value": 950, "unrealized_gain_pct": -5.0, "daily_change_%": -5.0},
     ]
     table = format_holdings_table(holdings)
     lines = table.split("\n")
     assert lines[0].startswith("SYMBOL")
     assert "GAIN%" in lines[0]
+    assert "TODAY" not in lines[0]  # dropped: overflowed narrower phones, %CHG already covers it
     assert "AAPL" in table and "MSFT" in table
     assert "+10.0%" in table
     assert "-5.0%" in table
@@ -51,7 +52,7 @@ def test_format_holdings_table_contains_header_and_rows():
 def test_format_holdings_table_privacy_masks_values():
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0},
     ]
     table = format_holdings_table(holdings, privacy=True)
     assert "1,100" not in table

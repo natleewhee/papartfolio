@@ -3,7 +3,7 @@ from telegram.ext import ContextTypes
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
-from fetcher import get_currency_for_symbol, get_prices_bulk
+from fetcher import get_currency_for_symbol, get_prices_bulk, fetch_extended_hours_bulk
 from support import compute_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
 from datetime import datetime
 import pytz
@@ -78,6 +78,33 @@ def _build_support_section(metrics):
         section += "\n" + flag_line
     return section
 
+def _build_extended_hours_section(metrics, privacy=False):
+    """Pre/post-market movement for held US tickers (SGX has no extended-hours
+    sessions). Most relevant right at the report's 20:30 SGT send time, which
+    sits inside the US pre-market window. Silently omits a holding when
+    extended-hours data isn't available (outside those windows, or the
+    slower yfinance lookup failed/timed out). Returns "" if nothing to show."""
+    us_symbols = [h["symbol"] for h in metrics["holdings"] if h["currency"] == "USD"]
+    if not us_symbols:
+        return ""
+
+    results = fetch_extended_hours_bulk(us_symbols)
+    rows = [(sym, r) for sym, r in sorted(results.items()) if r]
+    if not rows:
+        return ""
+
+    lines = ["", "🌅 *Pre/Post-Market (USD)*"]
+    for sym, r in rows:
+        label = "Pre" if r["market_state"] == "PRE" else "Post"
+        price_str = fmt_money(r["price"], "USD", privacy)
+        pct = r["change_pct"]
+        if not privacy and pct is not None:
+            emoji = "🟢" if pct >= 0 else "🔴"
+            lines.append(f"{sym}: {label} {price_str} {emoji} {pct:+.2f}%")
+        else:
+            lines.append(f"{sym}: {label} {price_str}")
+    return "\n".join(lines)
+
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""
     try:
@@ -128,6 +155,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
 
         if not compact:
             report += "\n" + f"```\n{format_holdings_table(metrics['holdings'], privacy)}\n```"
+
+        extended_hours_section = _build_extended_hours_section(metrics, privacy)
+        if extended_hours_section:
+            report += "\n" + extended_hours_section
 
         support_section = _build_support_section(metrics)
         if support_section:
