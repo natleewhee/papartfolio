@@ -121,6 +121,59 @@ def get_prices_bulk(symbols):
     with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as pool:
         return dict(pool.map(_one, symbols))
 
+def fetch_extended_hours(symbol):
+    """Pre/post-market price + % change for a US ticker, via yfinance's fuller
+    `.info` lookup — Finnhub's free tier has no extended-hours data at all.
+    Not used for SGX (.SI) tickers, which have no extended-hours sessions.
+
+    This is a noticeably heavier, slower call than get_price()'s quote
+    endpoints, so it's only used where extended-hours info is explicitly
+    wanted (the daily report, /price) — never in the core pricing pipeline
+    that every command/report already leans on. Returns None for SGX
+    tickers, when the market is in its regular session (nothing to show),
+    or on any fetch error.
+    """
+    if is_sg_ticker(symbol):
+        return None
+
+    def _fetch():
+        info = yfinance.Ticker(symbol.upper()).info
+        state = info.get("marketState")  # 'PRE'/'PREPRE' | 'REGULAR' | 'POST'/'POSTPOST' | 'CLOSED'
+        if state in ("PRE", "PREPRE"):
+            price = info.get("preMarketPrice")
+            change_pct = info.get("preMarketChangePercent")
+            market_state = "PRE"
+        elif state in ("POST", "POSTPOST"):
+            price = info.get("postMarketPrice")
+            change_pct = info.get("postMarketChangePercent")
+            market_state = "POST"
+        else:
+            return None
+        if price is None:
+            return None
+        return {"market_state": market_state, "price": price, "change_pct": change_pct}
+
+    return _retry(_fetch, f"extended-hours fetch for {symbol}")
+
+def fetch_extended_hours_bulk(symbols):
+    """Concurrent fetch_extended_hours() for many symbols — same pattern as
+    get_prices_bulk(), since each call is a slow blocking yfinance lookup.
+    Returns {symbol: result_or_None}; a per-symbol failure logs and resolves
+    to None rather than failing the whole batch."""
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+
+    def _one(symbol):
+        try:
+            return symbol, fetch_extended_hours(symbol)
+        except Exception as e:
+            logger.error(f"❌ Error fetching extended-hours data for {symbol}: {e}")
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as pool:
+        return dict(pool.map(_one, symbols))
+
 def validate_symbol(symbol):
     """Dispatch ticker validation the same way as get_price."""
     if is_sg_ticker(symbol):

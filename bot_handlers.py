@@ -2,7 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
 import pytz
-from fetcher import validate_symbol, get_price, get_currency_for_symbol
+from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours
 from portfolio_db import (
     add_holding, remove_holding, update_holding,
     get_all_holdings, get_holding, clear_all_holdings,
@@ -348,7 +348,9 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _delete_quietly(status)
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /price SYMBOL — quick lookup without adding to the portfolio"""
+    """Handle /price SYMBOL — quick lookup without adding to the portfolio.
+    For US tickers, also shows pre/post-market price when the market is
+    currently in one of those sessions (SGX has no extended-hours trading)."""
     if not await check_user(update):
         return
 
@@ -371,9 +373,18 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     change_pct = price_data["change_pct"] or 0
     change = price_data["change"] or 0
     emoji = "🟢" if change_pct >= 0 else "🔴"
+
+    price_line = f"Price: {fmt_money(price_data['price'], currency)}"
+    extended = fetch_extended_hours(symbol)
+    if extended:
+        label = "Pre-mkt" if extended["market_state"] == "PRE" else "Post-mkt"
+        ext_pct = extended["change_pct"]
+        ext_pct_str = f" ({ext_pct:+.2f}%)" if ext_pct is not None else ""
+        price_line += f" → {label} {fmt_money(extended['price'], currency)}{ext_pct_str}"
+
     await update.message.reply_text(
         f"*{symbol}*\n"
-        f"Price: {fmt_money(price_data['price'], currency)}\n"
+        f"{price_line}\n"
         f"Change: {emoji} {change_pct:+.2f}% ({fmt_money(change, currency, show_sign=True)})",
         parse_mode="Markdown"
     )
