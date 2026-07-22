@@ -33,17 +33,21 @@ def format_holdings_table(holdings, privacy=False):
     Markdown code block (```) so Telegram renders it with a fixed-width font.
 
     Columns read left to right as: identity, today's per-share price, what you
-    originally put in (cost basis), what it's worth now, then today's move."""
-    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'%CHG':>8}{'TODAY':>10}"
+    originally put in (cost basis), what it's worth now, overall gain, then
+    today's move."""
+    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'GAIN%':>8}{'%CHG':>8}{'TODAY':>10}"
     lines = [header, "-" * len(header)]
     for h in holdings:
         currency = h["currency"]
         price_str = fmt_money(h["current_price"], currency, privacy, decimals=2)
         cost_str = fmt_money(h["cost_basis"], currency, privacy, decimals=0)
         value_str = fmt_money(h["current_value"], currency, privacy, decimals=0)
+        gain_str = "•••" if privacy else f"{h['unrealized_gain_pct']:+.1f}%"
         pct_str = "•••" if privacy else f"{h['daily_change_%']:+.1f}%"
         chg_str = fmt_money(h["daily_change_$"], currency, privacy, show_sign=True, decimals=0)
-        lines.append(f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{pct_str:>8}{chg_str:>10}")
+        lines.append(
+            f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{gain_str:>8}{pct_str:>8}{chg_str:>10}"
+        )
     return "\n".join(lines)
 
 def calculate_portfolio_metrics(save_snapshot=True):
@@ -193,8 +197,11 @@ def calculate_portfolio_metrics(save_snapshot=True):
         best_performer = max(portfolio_data, key=lambda h: h["daily_change_%"])
         worst_performer = min(portfolio_data, key=lambda h: h["daily_change_%"])
 
-    # Sort by today's mover first (winners first) for display
-    portfolio_data.sort(key=lambda h: h["daily_change_%"], reverse=True)
+    # Sort by position size first (largest holdings first) for display — a
+    # "what do I actually own" glance shouldn't be led by today's biggest
+    # mover, which can bury your largest position under a small one that
+    # happened to jump today.
+    portfolio_data.sort(key=lambda h: h["_current_value_home"], reverse=True)
 
     unrealized_gain = total_value - total_cost_basis
     unrealized_gain_pct = (unrealized_gain / total_cost_basis * 100) if total_cost_basis > 0 else 0
