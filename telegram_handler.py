@@ -4,7 +4,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk
-from support import compute_support_levels_bulk, format_support_compact
+from support import compute_support_levels_bulk, format_support_table
 from datetime import datetime
 import pytz
 import logging
@@ -34,38 +34,45 @@ async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
         return False
 
 def _build_support_section(metrics):
-    """Compact per-stock support block for the daily report, covering every held
-    stock plus everything on the watchlist. Support levels are public market
-    prices (not portfolio values), so they're shown even in privacy mode.
-    Returns "" if there's nothing to report."""
-    held_price = {h["symbol"]: h["current_price"] for h in metrics["holdings"]}
+    """Compact support table for the daily report, covering only stocks
+    explicitly on the watchlist — holding a stock no longer implies tracking
+    its support levels; that's now a deliberate /watch action. Support levels
+    are public market prices (not portfolio values), so they're shown even in
+    privacy mode. Returns "" if the watchlist is empty."""
     watched = [w["symbol"] for w in get_watchlist()]
-    symbols = sorted(set(held_price) | set(watched))
-    if not symbols:
+    if not watched:
         return ""
 
-    # Watchlist-only symbols have no held price yet — fetch a live quote for
-    # those (concurrently) before computing support, so the report reflects
-    # today's actual price rather than yesterday's close.
-    missing = [s for s in symbols if held_price.get(s) is None]
-    resolved_price = dict(held_price)
+    # A watchlist symbol you also happen to hold already has a price from
+    # metrics — only fetch a live quote (concurrently) for the rest, so the
+    # report reflects today's actual price rather than yesterday's close.
+    held_price = {h["symbol"]: h["current_price"] for h in metrics["holdings"]}
+    resolved_price = {s: held_price[s] for s in watched if s in held_price}
+    missing = [s for s in watched if s not in resolved_price]
     if missing:
         quotes = get_prices_bulk(missing)
         for s, pd in quotes.items():
             resolved_price[s] = pd["price"] if pd and pd.get("price") else None
 
-    results = compute_support_levels_bulk((s, resolved_price.get(s)) for s in symbols)
+    results = compute_support_levels_bulk((s, resolved_price.get(s)) for s in watched)
 
-    lines = ["", "📉 *Support Levels*"]
-    for symbol in symbols:
+    rows = []
+    for symbol in watched:
         data = results.get(symbol)
-        if not data:
-            lines.append(f"*{symbol}*  — support data unavailable")
-        else:
-            currency = get_currency_for_symbol(symbol)
-            lines.append(format_support_compact(data, currency, fmt_money))
-    lines.append("_ST=short · MT=mid · (%) = drop from price to that support_")
-    return "\n".join(lines)
+        rows.append({
+            "symbol": symbol,
+            "currency": get_currency_for_symbol(symbol),
+            "current_price": data["current_price"] if data else None,
+            "short_term": data["short_term"] if data else None,
+            "mid_term": data["mid_term"] if data else None,
+        })
+
+    table = format_support_table(rows, fmt_money)
+    return (
+        "\n📉 *Watchlist — Support Levels*\n"
+        f"```\n{table}\n```\n"
+        "_ST=short · MT=mid support (below price) · % = drop to reach it_"
+    )
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""

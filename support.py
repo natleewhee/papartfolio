@@ -232,6 +232,34 @@ def format_support_compact(data, currency, fmt_money):
     return f"*{data['symbol']}*  {price} · {leg('ST', data['short_term'])} · {leg('MT', data['mid_term'])}"
 
 
+def format_support_table(rows, fmt_money):
+    """Render support levels as an aligned monospace table — same style as
+    format_holdings_table() in portfolio.py — meant to be wrapped by the
+    caller in a ``` code block so Telegram renders it with a fixed-width font.
+
+    rows: list of {"symbol", "currency", "current_price", "short_term", "mid_term"}
+    (current_price/short_term/mid_term are None when data was unavailable for
+    that symbol; short_term/mid_term are each None or a level dict with
+    "level" and "distance_pct").
+    `fmt_money` is injected to avoid coupling this module to portfolio.py.
+    """
+    header = f"{'SYMBOL':<8}{'PRICE':>10}{'ST':>10}{'ST%':>8}{'MT':>10}{'MT%':>8}"
+    lines = [header, "-" * len(header)]
+    for r in rows:
+        if r.get("current_price") is None:
+            lines.append(f"{r['symbol']:<8}{'n/a':>10}{'n/a':>10}{'n/a':>8}{'n/a':>10}{'n/a':>8}")
+            continue
+        currency = r["currency"]
+        st, mt = r.get("short_term"), r.get("mid_term")
+        price_str = fmt_money(r["current_price"], currency)
+        st_str = fmt_money(st["level"], currency) if st else "n/a"
+        st_pct = f"-{st['distance_pct']:.1f}%" if st else "n/a"
+        mt_str = fmt_money(mt["level"], currency) if mt else "n/a"
+        mt_pct = f"-{mt['distance_pct']:.1f}%" if mt else "n/a"
+        lines.append(f"{r['symbol']:<8}{price_str:>10}{st_str:>10}{st_pct:>8}{mt_str:>10}{mt_pct:>8}")
+    return "\n".join(lines)
+
+
 def format_resistance_compact(data, currency, fmt_money):
     """One-line summary, e.g. `AAPL  $195 · ST $205 (+5.1%) · MT $220 (+12.8%)`
     (the % is the rise needed from today's price up to that resistance)."""
