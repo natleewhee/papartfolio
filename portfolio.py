@@ -30,15 +30,20 @@ def fmt_money(value, currency="USD", privacy=False, show_sign=False, decimals=2)
 
 def format_holdings_table(holdings, privacy=False):
     """Render holdings as an aligned monospace table — wrap the result in a
-    Markdown code block (```) so Telegram renders it with a fixed-width font."""
-    header = f"{'SYMBOL':<7}{'VALUE':>10}{'%CHG':>8}{'TODAY':>10}"
+    Markdown code block (```) so Telegram renders it with a fixed-width font.
+
+    Columns read left to right as: identity, today's per-share price, what you
+    originally put in (cost basis), what it's worth now, then today's move."""
+    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'%CHG':>8}{'TODAY':>10}"
     lines = [header, "-" * len(header)]
     for h in holdings:
         currency = h["currency"]
+        price_str = fmt_money(h["current_price"], currency, privacy, decimals=2)
+        cost_str = fmt_money(h["cost_basis"], currency, privacy, decimals=0)
         value_str = fmt_money(h["current_value"], currency, privacy, decimals=0)
         pct_str = "•••" if privacy else f"{h['daily_change_%']:+.1f}%"
         chg_str = fmt_money(h["daily_change_$"], currency, privacy, show_sign=True, decimals=0)
-        lines.append(f"{h['symbol']:<7}{value_str:>10}{pct_str:>8}{chg_str:>10}")
+        lines.append(f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{pct_str:>8}{chg_str:>10}")
     return "\n".join(lines)
 
 def calculate_portfolio_metrics(save_snapshot=True):
