@@ -4,7 +4,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk
-from support import compute_support_levels_bulk, format_support_table
+from support import compute_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
 from datetime import datetime
 import pytz
 import logging
@@ -68,11 +68,15 @@ def _build_support_section(metrics):
         })
 
     table = format_support_table(rows, fmt_money)
-    return (
+    section = (
         "\n📉 *Watchlist — Support Levels*\n"
         f"```\n{table}\n```\n"
         "_ST=short · MT=mid support (below price) · % = drop to reach it_"
     )
+    flag_line = format_near_support_line(near_support_flags(rows))
+    if flag_line:
+        section += "\n" + flag_line
+    return section
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""

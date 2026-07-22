@@ -260,6 +260,36 @@ def format_support_table(rows, fmt_money):
     return "\n".join(lines)
 
 
+NEAR_SUPPORT_THRESHOLD_PCT = 5.0  # matches /alertsupport's own default
+
+
+def near_support_flags(rows, threshold=NEAR_SUPPORT_THRESHOLD_PCT):
+    """Which rows have a support horizon within `threshold`% of price right
+    now — a passive, no-setup-required version of what /alertsupport
+    otherwise needs a manual per-symbol alert for. Returns
+    [(symbol, "ST"|"MT", distance_pct), ...] for the closer qualifying
+    horizon per symbol, sorted closest-first."""
+    flags = []
+    for r in rows:
+        candidates = [
+            (label, sl["distance_pct"])
+            for label, sl in (("ST", r.get("short_term")), ("MT", r.get("mid_term")))
+            if sl and sl["distance_pct"] <= threshold
+        ]
+        if candidates:
+            label, dist = min(candidates, key=lambda x: x[1])
+            flags.append((r["symbol"], label, dist))
+    return sorted(flags, key=lambda x: x[2])
+
+
+def format_near_support_line(flags):
+    """One-line summary of near_support_flags()'s output, or "" if none."""
+    if not flags:
+        return ""
+    parts = [f"{symbol} ({label} -{dist:.1f}%)" for symbol, label, dist in flags]
+    return "⚠️ Near support: " + ", ".join(parts)
+
+
 def format_resistance_compact(data, currency, fmt_money):
     """One-line summary, e.g. `AAPL  $195 · ST $205 (+5.1%) · MT $220 (+12.8%)`
     (the % is the rise needed from today's price up to that resistance)."""

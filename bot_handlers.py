@@ -17,6 +17,7 @@ from portfolio import (
 from support import (
     compute_support_levels, compute_support_levels_bulk, compute_resistance_levels,
     format_support_table, format_resistance_compact,
+    near_support_flags, format_near_support_line,
 )
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
@@ -720,12 +721,6 @@ async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in /alertsupport: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
-def _tracked_symbols():
-    """Symbols to compute support levels for: only what's on the watchlist —
-    holding a stock no longer implies tracking its support levels; that's
-    now a deliberate /watch action."""
-    return [w["symbol"] for w in get_watchlist()]
-
 def _support_rows(symbols):
     """Compute support levels for many symbols concurrently and shape them
     into rows ready for support.format_support_table(). A symbol with
@@ -806,59 +801,51 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"```\n{format_support_table(rows, fmt_money)}\n```\n"
         "_ST=short-term · MT=mid-term support (below price) · % = drop to reach it_"
     )
+    flag_line = format_near_support_line(near_support_flags(rows))
+    if flag_line:
+        msg += "\n" + flag_line
     await update.message.reply_text(msg, parse_mode="Markdown")
     await _delete_quietly(status)
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /support [SYMBOL] — support levels for one stock, or all tracked stocks"""
+    """Handle /support SYMBOL — detailed short & mid-term support for one stock
+    (works for any ticker, not just watchlist ones). For all your watchlist
+    stocks at once, see /watchlist instead."""
     if not await check_user(update):
         return
 
     parts = update.message.text.split()
-
-    # /support SYMBOL — detailed single-stock view
-    if len(parts) == 2:
-        symbol = parts[1].upper()
-        status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
-        currency = get_currency_for_symbol(symbol)
-        data = compute_support_levels(symbol)
-        if not data:
-            await update.message.reply_text(
-                f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
-            )
-            await _delete_quietly(status)
-            return
-
-        def leg(sl):
-            if not sl:
-                return "n/a (price near its own low)"
-            return f"{fmt_money(sl['level'], currency)} (-{sl['distance_pct']:.1f}%) — {sl['basis']}"
-
-        msg = (
-            f"📉 *{data['symbol']} — Support Levels*\n\n"
-            f"Price: {fmt_money(data['current_price'], currency)}\n"
-            f"Short-term: {leg(data['short_term'])}\n"
-            f"Mid-term: {leg(data['mid_term'])}\n\n"
-            "_(%) = the drop from today's price down to that support._"
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /support SYMBOL\n"
+            "Example: /support AAPL\n\n"
+            "For all your watchlist stocks at once, use /watchlist"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    symbol = parts[1].upper()
+    status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
+    currency = get_currency_for_symbol(symbol)
+    data = compute_support_levels(symbol)
+    if not data:
+        await update.message.reply_text(
+            f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
+        )
         await _delete_quietly(status)
         return
 
-    # /support — everything on the watchlist
-    symbols = _tracked_symbols()
-    if not symbols:
-        await update.message.reply_text(
-            "📭 Watchlist is empty. Track a stock with /watch SYMBOL first."
-        )
-        return
+    def leg(sl):
+        if not sl:
+            return "n/a (price near its own low)"
+        return f"{fmt_money(sl['level'], currency)} (-{sl['distance_pct']:.1f}%) — {sl['basis']}"
 
-    status = await update.message.reply_text("🔄 Computing support levels...")
-    rows = _support_rows(symbols)
     msg = (
-        "📉 *Support Levels*\n"
-        f"```\n{format_support_table(rows, fmt_money)}\n```\n"
-        "_ST=short-term · MT=mid-term support (below price) · % = drop to reach it_"
+        f"📉 *{data['symbol']} — Support Levels*\n\n"
+        f"Price: {fmt_money(data['current_price'], currency)}\n"
+        f"Short-term: {leg(data['short_term'])}\n"
+        f"Mid-term: {leg(data['mid_term'])}\n\n"
+        "_(%) = the drop from today's price down to that support._"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
     await _delete_quietly(status)
@@ -927,12 +914,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 whichever you actually hold)
 
 *— Support & Resistance —*
-/support [SYMBOL] — short & mid-term support + how far price is above it
-  (no symbol = everything on your watchlist)
+/support SYMBOL — short & mid-term support for one stock (any ticker)
 /resistance SYMBOL — short & mid-term resistance + rise needed to reach it
 /watch SYMBOL — track a stock's support levels without holding it
 /unwatch SYMBOL — stop tracking a watchlist stock
-/watchlist — watched stocks with their support levels
+/watchlist — all your watched stocks' support levels at a glance
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level

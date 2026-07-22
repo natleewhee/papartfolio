@@ -6,6 +6,7 @@ from support import (
     _sma, _pivots, _horizon_level, _fetch_history,
     compute_support_levels, compute_resistance_levels, compute_support_levels_bulk,
     format_support_compact, format_resistance_compact, format_support_table,
+    near_support_flags, format_near_support_line,
 )
 from portfolio import fmt_money
 
@@ -256,3 +257,38 @@ def test_format_support_table_handles_missing_price_as_row():
     table = format_support_table(rows, fmt_money)
     assert "BAD" in table
     assert "n/a" in table
+
+
+# ---------- near_support_flags / format_near_support_line ----------
+
+def test_near_support_flags_picks_closer_horizon_and_sorts_by_distance():
+    rows = [
+        {
+            "symbol": "FAR", "short_term": {"level": 1, "distance_pct": 20.0},
+            "mid_term": {"level": 1, "distance_pct": 30.0},
+        },
+        {
+            "symbol": "NEAR", "short_term": {"level": 1, "distance_pct": 4.0},
+            "mid_term": {"level": 1, "distance_pct": 1.5},
+        },
+        {
+            "symbol": "MID", "short_term": {"level": 1, "distance_pct": 3.0},
+            "mid_term": None,
+        },
+    ]
+    flags = near_support_flags(rows, threshold=5.0)
+
+    assert [f[0] for f in flags] == ["NEAR", "MID"]  # FAR excluded, closest first
+    assert flags[0] == ("NEAR", "MT", 1.5)  # MT is the closer of NEAR's two horizons
+    assert flags[1] == ("MID", "ST", 3.0)
+
+
+def test_near_support_flags_empty_when_nothing_qualifies():
+    rows = [{"symbol": "FAR", "short_term": {"level": 1, "distance_pct": 20.0}, "mid_term": None}]
+    assert near_support_flags(rows, threshold=5.0) == []
+
+
+def test_format_near_support_line():
+    assert format_near_support_line([]) == ""
+    line = format_near_support_line([("AAPL", "ST", 4.5), ("MSFT", "MT", 1.2)])
+    assert line == "⚠️ Near support: AAPL (ST -4.5%), MSFT (MT -1.2%)"

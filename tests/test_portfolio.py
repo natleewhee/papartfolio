@@ -33,13 +33,14 @@ def test_fmt_money_decimals():
 def test_format_holdings_table_contains_header_and_rows():
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "daily_change_%": 10.0, "daily_change_$": 100},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100},
         {"symbol": "MSFT", "currency": "USD", "current_price": 190.0, "cost_basis": 1000,
-         "current_value": 950, "daily_change_%": -5.0, "daily_change_$": -50},
+         "current_value": 950, "unrealized_gain_pct": -5.0, "daily_change_%": -5.0, "daily_change_$": -50},
     ]
     table = format_holdings_table(holdings)
     lines = table.split("\n")
     assert lines[0].startswith("SYMBOL")
+    assert "GAIN%" in lines[0]
     assert "AAPL" in table and "MSFT" in table
     assert "+10.0%" in table
     assert "-5.0%" in table
@@ -50,7 +51,7 @@ def test_format_holdings_table_contains_header_and_rows():
 def test_format_holdings_table_privacy_masks_values():
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "daily_change_%": 10.0, "daily_change_$": 100},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100},
     ]
     table = format_holdings_table(holdings, privacy=True)
     assert "1,100" not in table
@@ -133,6 +134,29 @@ def test_calculate_portfolio_metrics_skips_failed_price_fetch(monkeypatch):
     assert metrics["failed_symbols"] == ["BAD"]
     assert len(metrics["holdings"]) == 1
     assert metrics["holdings"][0]["symbol"] == "AAPL"
+
+
+def test_calculate_portfolio_metrics_sorts_by_position_size(monkeypatch):
+    # MSFT is the bigger position but AAPL had the bigger move today — display
+    # order should lead with position size, not today's mover.
+    holdings = [
+        {"symbol": "AAPL", "shares": 10, "avg_cost": 100.0, "currency": "USD"},
+        {"symbol": "MSFT", "shares": 50, "avg_cost": 200.0, "currency": "USD"},
+    ]
+    prices = {
+        "AAPL": {"symbol": "AAPL", "price": 150.0, "change": 50.0, "change_pct": 50.0},
+        "MSFT": {"symbol": "MSFT", "price": 201.0, "change": 1.0, "change_pct": 0.5},
+    }
+
+    monkeypatch.setattr(portfolio, "get_all_holdings", lambda: holdings)
+    monkeypatch.setattr(portfolio, "get_prices_bulk", lambda symbols: prices)
+    monkeypatch.setattr(portfolio, "fetch_fx_rate", lambda frm, to: 1.0)
+    monkeypatch.setattr(portfolio, "HOME_CURRENCY", "USD")
+
+    metrics = calculate_portfolio_metrics(save_snapshot=False)
+
+    assert [h["symbol"] for h in metrics["holdings"]] == ["MSFT", "AAPL"]
+    assert metrics["best_performer"]["symbol"] == "AAPL"  # unaffected by display order
 
 
 def test_calculate_portfolio_metrics_empty_portfolio(monkeypatch):
