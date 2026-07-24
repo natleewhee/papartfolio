@@ -5,6 +5,7 @@ from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_ta
 from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk, fetch_extended_hours_bulk
 from support import compute_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
+from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
 from datetime import datetime
 import pytz
 import logging
@@ -105,6 +106,32 @@ def _build_extended_hours_section(metrics, privacy=False):
             lines.append(f"{sym}: {label} {price_str}")
     return "\n".join(lines)
 
+def _build_earnings_section(metrics):
+    """Earnings-release radar for held + watchlist stocks: flags anything
+    reporting within the next 2 weeks, or that reported within the last few
+    days. Most stocks have nothing to say on a given day, so — unlike the
+    support table — this is a flagged list, silent for everything else.
+    Returns "" if nothing qualifies."""
+    held = [h["symbol"] for h in metrics["holdings"]]
+    watched = [w["symbol"] for w in get_watchlist()]
+    symbols = sorted(set(held) | set(watched))
+    if not symbols:
+        return ""
+
+    results = fetch_earnings_bulk(symbols)
+    upcoming, recent = earnings_flags(results)
+    if not upcoming and not recent:
+        return ""
+
+    lines = ["", "📅 *Earnings Watch*"]
+    for symbol, next_event in upcoming:
+        currency = get_currency_for_symbol(symbol)
+        lines.append(format_earnings_line(symbol, currency, fmt_money, next_event=next_event))
+    for symbol, last_event in recent:
+        currency = get_currency_for_symbol(symbol)
+        lines.append(format_earnings_line(symbol, currency, fmt_money, last_event=last_event))
+    return "\n".join(lines)
+
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""
     try:
@@ -159,6 +186,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         extended_hours_section = _build_extended_hours_section(metrics, privacy)
         if extended_hours_section:
             report += "\n" + extended_hours_section
+
+        earnings_section = _build_earnings_section(metrics)
+        if earnings_section:
+            report += "\n" + earnings_section
 
         support_section = _build_support_section(metrics)
         if support_section:

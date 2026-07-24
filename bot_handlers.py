@@ -19,6 +19,7 @@ from support import (
     format_support_table, format_resistance_compact,
     near_support_flags, format_near_support_line,
 )
+from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -901,6 +902,99 @@ async def cmd_resistance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
     await _delete_quietly(status)
 
+async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /earnings [SYMBOL] — next earnings date + last reported result
+    for one stock, or a sweep of holdings + watchlist showing only what's
+    upcoming (next 2 weeks) or recently released (last few days)."""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+
+    # /earnings SYMBOL — detailed single-stock view
+    if len(parts) == 2:
+        symbol = parts[1].upper()
+        status = await update.message.reply_text(f"🔄 Checking earnings for {symbol}...")
+        currency = get_currency_for_symbol(symbol)
+        data = fetch_earnings(symbol)
+        if not data or (not data["next"] and not data["last"]):
+            await update.message.reply_text(f"❌ No earnings data found for {symbol}.")
+            await _delete_quietly(status)
+            return
+
+        lines = [f"📅 *{symbol} — Earnings*", ""]
+
+        nxt = data["next"]
+        if nxt:
+            when = nxt["date"].strftime("%a %d %b %Y")
+            timing = f" ({nxt['timing']})" if nxt["timing"] else ""
+            lines.append(f"Next report: {when} (in {nxt['days_until']} days){timing}")
+        else:
+            lines.append("Next report: not scheduled yet")
+
+        lst = data["last"]
+        if lst:
+            actual_str = fmt_money(lst["eps_actual"], currency) if lst["eps_actual"] is not None else "n/a"
+            if lst["surprise_pct"] is not None and lst["eps_estimate"] is not None:
+                est_str = fmt_money(lst["eps_estimate"], currency)
+                lines.append(
+                    f"Last quarter: EPS {actual_str} vs {est_str} est "
+                    f"({lst['surprise_pct']:+.1f}%), reported {lst['days_since']} days ago"
+                )
+            else:
+                lines.append(f"Last quarter: EPS {actual_str}, reported {lst['days_since']} days ago")
+        else:
+            lines.append("Last quarter: no reported data available")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await _delete_quietly(status)
+        return
+
+    if len(parts) != 1:
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /earnings [SYMBOL]\n"
+            "Example: /earnings AAPL"
+        )
+        return
+
+    # /earnings — sweep holdings + watchlist for anything upcoming/recent
+    held = [h["symbol"] for h in get_all_holdings()]
+    watched = [w["symbol"] for w in get_watchlist()]
+    symbols = sorted(set(held) | set(watched))
+    if not symbols:
+        await update.message.reply_text(
+            "📭 Nothing to check. Add holdings with /add or track stocks with /watch."
+        )
+        return
+
+    status = await update.message.reply_text("🔄 Checking earnings calendar...")
+    results = fetch_earnings_bulk(symbols)
+    upcoming, recent = earnings_flags(results)
+
+    if not upcoming and not recent:
+        await update.message.reply_text(
+            "📭 Nothing upcoming or recently released for your holdings/watchlist."
+        )
+        await _delete_quietly(status)
+        return
+
+    lines = ["📅 *Earnings Watch — Holdings & Watchlist*", ""]
+    if upcoming:
+        lines.append(f"_Upcoming (next {UPCOMING_WINDOW_DAYS} days):_")
+        for symbol, next_event in upcoming:
+            currency = get_currency_for_symbol(symbol)
+            lines.append(format_earnings_line(symbol, currency, fmt_money, next_event=next_event))
+        lines.append("")
+    if recent:
+        lines.append("_Recently released:_")
+        for symbol, last_event in recent:
+            currency = get_currency_for_symbol(symbol)
+            lines.append(format_earnings_line(symbol, currency, fmt_money, last_event=last_event))
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _delete_quietly(status)
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
     if not await check_user(update):
@@ -930,6 +1024,10 @@ whichever you actually hold)
 /watch SYMBOL — track a stock's support levels without holding it
 /unwatch SYMBOL — stop tracking a watchlist stock
 /watchlist — all your watched stocks' support levels at a glance
+
+*— Earnings —*
+/earnings [SYMBOL] — next earnings date + last result for one stock
+  (no symbol = holdings + watchlist, upcoming 14 days or reported last 3 days)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
