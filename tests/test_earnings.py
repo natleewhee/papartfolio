@@ -176,6 +176,16 @@ def test_format_earnings_line_upcoming():
     assert line == "AAPL — in 5d (Fri 30 Jan, after market close)"
 
 
+def test_format_earnings_line_upcoming_unconfirmed_timing():
+    """Finnhub often leaves before/after-market timing blank until closer to
+    the date (especially for smaller tickers) — say so explicitly rather
+    than silently dropping it."""
+    from datetime import date
+    next_event = {"date": date(2026, 1, 30), "days_until": 5, "timing": None, "eps_estimate": None}
+    line = format_earnings_line("NBIS", "USD", fmt_money, next_event=next_event)
+    assert line == "NBIS — in 5d (Fri 30 Jan, timing TBD)"
+
+
 def test_format_earnings_line_recent_with_surprise():
     last_event = {"date": None, "days_since": 1, "eps_actual": 1.42, "eps_estimate": 1.35, "surprise_pct": 5.2}
     line = format_earnings_line("DRAM", "USD", fmt_money, last_event=last_event)
