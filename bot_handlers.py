@@ -927,8 +927,8 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nxt = data["next"]
         if nxt:
             when = nxt["date"].strftime("%a %d %b %Y")
-            timing = f" ({nxt['timing']})" if nxt["timing"] else ""
-            lines.append(f"Next report: {when} (in {nxt['days_until']} days){timing}")
+            timing = nxt["timing"] or "timing not yet confirmed"
+            lines.append(f"Next report: {when} (in {nxt['days_until']} days, {timing})")
         else:
             lines.append("Next report: not scheduled yet")
 

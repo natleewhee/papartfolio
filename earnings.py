@@ -199,8 +199,12 @@ def format_earnings_line(symbol, currency, fmt_money, next_event=None, last_even
     """
     if next_event:
         when = next_event["date"].strftime("%a %d %b")
-        timing = f", {next_event['timing']}" if next_event["timing"] else ""
-        return f"{symbol} — in {next_event['days_until']}d ({when}{timing})"
+        # Finnhub frequently leaves before/after-market timing unconfirmed
+        # until closer to the date, especially for smaller/less-followed
+        # tickers — say so explicitly rather than silently dropping it,
+        # which reads as broken rather than "not yet known".
+        timing = next_event["timing"] or "timing TBD"
+        return f"{symbol} — in {next_event['days_until']}d ({when}, {timing})"
 
     if last_event:
         eps_actual = last_event["eps_actual"]
