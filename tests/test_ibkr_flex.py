@@ -2,7 +2,7 @@ import pytest
 import ibkr_flex
 from ibkr_flex import (
     is_configured, _parse_positions, _request_statement, _fetch_statement,
-    reconcile_holdings, _format_summary,
+    fetch_flex_positions, reconcile_holdings, _format_summary,
 )
 
 
@@ -117,19 +117,22 @@ class _FakeResponse:
 def test_request_statement_success(monkeypatch):
     xml = '<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode></FlexStatementResponse>'
     monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(xml))
-    assert _request_statement() == "REF123"
+    assert _request_statement() == ("REF123", None)
 
 
-def test_request_statement_failure(monkeypatch):
-    xml = '<FlexStatementResponse><Status>Fail</Status><ErrorMessage>Invalid token</ErrorMessage></FlexStatementResponse>'
+def test_request_statement_failure_surfaces_error_message(monkeypatch):
+    xml = '<FlexStatementResponse><Status>Fail</Status><ErrorCode>1003</ErrorCode><ErrorMessage>Invalid token</ErrorMessage></FlexStatementResponse>'
     monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(xml))
-    assert _request_statement() is None
+    reference_code, error = _request_statement()
+    assert reference_code is None
+    assert "Invalid token" in error
+    assert "1003" in error
 
 
 def test_fetch_statement_ready_immediately(monkeypatch):
     xml = _flex_xml()
     monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(xml))
-    assert _fetch_statement("REF") == xml
+    assert _fetch_statement("REF") == (xml, None)
 
 
 def test_fetch_statement_retries_until_ready(monkeypatch):
@@ -143,15 +146,49 @@ def test_fetch_statement_retries_until_ready(monkeypatch):
         return _FakeResponse(not_ready if calls["n"] < 3 else ready)
 
     monkeypatch.setattr(ibkr_flex.requests, "get", fake_get)
-    assert _fetch_statement("REF") == ready
+    assert _fetch_statement("REF") == (ready, None)
     assert calls["n"] == 3
 
 
-def test_fetch_statement_never_ready_returns_none(monkeypatch):
+def test_fetch_statement_never_ready_returns_last_error(monkeypatch):
     monkeypatch.setattr(ibkr_flex.time, "sleep", lambda s: None)
-    not_ready = '<FlexStatementResponse><Status>Warn</Status><ErrorMessage>not ready</ErrorMessage></FlexStatementResponse>'
+    not_ready = '<FlexStatementResponse><Status>Warn</Status><ErrorMessage>Statement generation in progress</ErrorMessage></FlexStatementResponse>'
     monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(not_ready))
-    assert _fetch_statement("REF") is None
+    xml_text, error = _fetch_statement("REF")
+    assert xml_text is None
+    assert "Statement generation in progress" in error
+
+
+# ---------- fetch_flex_positions (end-to-end error propagation) ----------
+
+def test_fetch_flex_positions_propagates_send_request_error(monkeypatch):
+    xml = '<FlexStatementResponse><Status>Fail</Status><ErrorMessage>Invalid token</ErrorMessage></FlexStatementResponse>'
+    monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(xml))
+
+    positions, error = fetch_flex_positions()
+
+    assert positions is None
+    assert "Invalid token" in error
+
+
+def test_fetch_flex_positions_success_end_to_end(monkeypatch):
+    send_ok = '<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF</ReferenceCode></FlexStatementResponse>'
+    report = _flex_xml(
+        '<OpenPosition accountId="U123" currency="USD" assetCategory="STK" symbol="AAPL" '
+        'position="15" costBasisPrice="148.10" />',
+    )
+    calls = {"n": 0}
+
+    def fake_get(url, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse(send_ok if calls["n"] == 1 else report)
+
+    monkeypatch.setattr(ibkr_flex.requests, "get", fake_get)
+
+    positions, error = fetch_flex_positions()
+
+    assert error is None
+    assert positions == [{"symbol": "AAPL", "shares": 15, "avg_cost": 148.1, "currency": "USD"}]
 
 
 # ---------- reconcile_holdings ----------
@@ -163,18 +200,19 @@ def test_reconcile_not_configured(monkeypatch):
     assert result["status"] == "not_configured"
 
 
-def test_reconcile_fetch_failed(monkeypatch):
+def test_reconcile_fetch_failed_carries_error_reason(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: None)
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (None, "Invalid token (code 1003)"))
     result = reconcile_holdings()
     assert result["status"] == "fetch_failed"
+    assert result["error"] == "Invalid token (code 1003)"
 
 
 def test_reconcile_refuses_to_wipe_on_empty_result(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: [])
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([], None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
         {"symbol": "AAPL", "shares": 10, "avg_cost": 100.0, "currency": "USD"},
     ])
@@ -190,7 +228,7 @@ def test_reconcile_refuses_to_wipe_on_empty_result(monkeypatch):
 def test_reconcile_empty_ibkr_and_empty_db_is_a_harmless_ok(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: [])
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([], None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [])
 
     result = reconcile_holdings()
@@ -201,11 +239,11 @@ def test_reconcile_empty_ibkr_and_empty_db_is_a_harmless_ok(monkeypatch):
 def test_reconcile_adds_updates_and_removes(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: [
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([
         {"symbol": "NVDA", "shares": 5, "avg_cost": 130.0, "currency": "USD"},   # new
         {"symbol": "AAPL", "shares": 15, "avg_cost": 148.1, "currency": "USD"},  # changed shares
         {"symbol": "MSFT", "shares": 3, "avg_cost": 400.0, "currency": "USD"},   # unchanged
-    ])
+    ], None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
         {"symbol": "AAPL", "shares": 10, "avg_cost": 148.1, "currency": "USD"},
         {"symbol": "MSFT", "shares": 3, "avg_cost": 400.0, "currency": "USD"},
@@ -227,7 +265,7 @@ def test_reconcile_no_changes_when_everything_matches(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
     same = [{"symbol": "AAPL", "shares": 10, "avg_cost": 148.1, "currency": "USD"}]
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: same)
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (same, None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: same)
 
     result = reconcile_holdings()
@@ -244,6 +282,13 @@ def test_format_summary_not_configured_returns_none():
 def test_format_summary_fetch_failed():
     msg = _format_summary({"status": "fetch_failed", "added": [], "updated": [], "removed": []})
     assert "Couldn't fetch" in msg
+
+
+def test_format_summary_fetch_failed_includes_reason():
+    result = {"status": "fetch_failed", "added": [], "updated": [], "removed": [],
+              "error": "Invalid token (code 1003)"}
+    msg = _format_summary(result)
+    assert "Reason: Invalid token (code 1003)" in msg
 
 
 def test_format_summary_skipped_empty():

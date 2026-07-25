@@ -38,8 +38,10 @@ def is_configured():
 
 
 def _request_statement():
-    """Kick off Flex report generation. Returns a reference code, or None on
-    failure."""
+    """Kick off Flex report generation. Returns (reference_code, error) —
+    reference_code is None on failure, with `error` describing why (surfaced
+    all the way up to the Telegram summary, so a bad token/query ID is
+    diagnosable without digging through server logs)."""
     try:
         response = requests.get(
             SEND_REQUEST_URL,
@@ -51,18 +53,22 @@ def _request_statement():
         status = root.findtext("Status")
         if status != "Success":
             error_msg = root.findtext("ErrorMessage") or "unknown error"
-            logger.error(f"❌ IBKR Flex SendRequest failed: {error_msg}")
-            return None
-        return root.findtext("ReferenceCode")
+            error_code = root.findtext("ErrorCode")
+            full_error = f"{error_msg} (code {error_code})" if error_code else error_msg
+            logger.error(f"❌ IBKR Flex SendRequest failed: {full_error}")
+            return None, full_error
+        return root.findtext("ReferenceCode"), None
     except Exception as e:
         logger.error(f"❌ IBKR Flex SendRequest error: {e}")
-        return None
+        return None, str(e)
 
 
 def _fetch_statement(reference_code):
     """Poll for the generated report — IBKR generates it asynchronously,
-    typically within seconds but occasionally longer. Returns the raw XML
-    report text, or None if it never became ready."""
+    typically within seconds but occasionally longer. Returns (xml_text,
+    error) — xml_text is None if it never became ready, with `error`
+    describing the last issue seen."""
+    last_error = None
     for attempt in range(GET_STATEMENT_RETRIES):
         try:
             response = requests.get(
@@ -77,15 +83,16 @@ def _fetch_statement(reference_code):
             # <FlexQueryResponse> — cheap to tell apart by root tag alone.
             root = ET.fromstring(text)
             if root.tag == "FlexQueryResponse":
-                return text
-            error_msg = root.findtext("ErrorMessage") or "not ready"
-            logger.info(f"ℹ️ IBKR Flex statement not ready yet ({error_msg}), retrying...")
+                return text, None
+            last_error = root.findtext("ErrorMessage") or "not ready"
+            logger.info(f"ℹ️ IBKR Flex statement not ready yet ({last_error}), retrying...")
         except Exception as e:
+            last_error = str(e)
             logger.warning(f"⚠️ IBKR Flex GetStatement attempt {attempt + 1} failed: {e}")
         if attempt < GET_STATEMENT_RETRIES - 1:
             time.sleep(GET_STATEMENT_RETRY_DELAY_SECONDS)
-    logger.error("❌ IBKR Flex statement never became ready")
-    return None
+    logger.error(f"❌ IBKR Flex statement never became ready: {last_error}")
+    return None, last_error
 
 
 def _parse_positions(xml_text):
@@ -139,15 +146,19 @@ def _parse_positions(xml_text):
 
 
 def fetch_flex_positions():
-    """End-to-end Flex fetch: request -> poll -> parse. Returns a list of
-    positions, or None if the fetch failed at any stage."""
-    reference_code = _request_statement()
+    """End-to-end Flex fetch: request -> poll -> parse. Returns
+    (positions, error) — positions is None if the fetch failed at any stage,
+    with `error` describing why."""
+    reference_code, error = _request_statement()
     if not reference_code:
-        return None
-    xml_text = _fetch_statement(reference_code)
+        return None, error
+    xml_text, error = _fetch_statement(reference_code)
     if not xml_text:
-        return None
-    return _parse_positions(xml_text)
+        return None, error
+    positions = _parse_positions(xml_text)
+    if positions is None:
+        return None, "malformed XML in Flex report"
+    return positions, None
 
 
 def reconcile_holdings():
@@ -166,14 +177,15 @@ def reconcile_holdings():
         "added": [{"symbol", "shares", "avg_cost", "currency"}, ...],
         "updated": [{"symbol", "from": {...}, "to": {...}}, ...],
         "removed": [{"symbol", "shares", "avg_cost", "currency"}, ...],
+        "error": str | None,  # only meaningful when status == "fetch_failed"
     }
     """
     if not is_configured():
         return {"status": "not_configured", "added": [], "updated": [], "removed": []}
 
-    ibkr_positions = fetch_flex_positions()
+    ibkr_positions, error = fetch_flex_positions()
     if ibkr_positions is None:
-        return {"status": "fetch_failed", "added": [], "updated": [], "removed": []}
+        return {"status": "fetch_failed", "added": [], "updated": [], "removed": [], "error": error}
 
     current = {h["symbol"]: h for h in get_all_holdings()}
     ibkr_by_symbol = {p["symbol"]: p for p in ibkr_positions}
@@ -212,10 +224,12 @@ def _format_summary(result):
     if status == "not_configured":
         return None
     if status == "fetch_failed":
+        detail = f"\nReason: {result['error']}" if result.get("error") else ""
         return (
             "⚠️ *IBKR Reconciliation*\n\n"
             "Couldn't fetch the Flex report — holdings unchanged. "
             "Will retry at the next scheduled sync."
+            f"{detail}"
         )
     if status == "skipped_empty":
         return (
