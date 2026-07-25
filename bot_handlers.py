@@ -20,6 +20,7 @@ from support import (
     near_support_flags, format_near_support_line,
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
+from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -995,6 +996,28 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     await _delete_quietly(status)
 
+async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /reconcile — manually trigger the IBKR holdings reconciliation
+    that otherwise runs automatically 10 min after each market close."""
+    if not await check_user(update):
+        return
+
+    if not ibkr_configured():
+        await update.message.reply_text(
+            "❌ IBKR reconciliation isn't configured — set IBKR_FLEX_TOKEN and "
+            "IBKR_FLEX_QUERY_ID to enable it."
+        )
+        return
+
+    status = await update.message.reply_text("🔄 Fetching IBKR Flex report...")
+    try:
+        await run_reconciliation()
+    except Exception as e:
+        logger.error(f"Error in /reconcile: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        await _delete_quietly(status)
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
     if not await check_user(update):
@@ -1028,6 +1051,10 @@ whichever you actually hold)
 *— Earnings —*
 /earnings [SYMBOL] — next earnings date + last result for one stock
   (no symbol = holdings + watchlist, upcoming 14 days or reported last 3 days)
+
+*— IBKR Reconciliation —*
+/reconcile — manually sync holdings from IBKR (normally runs automatically
+  ~10 min after each market close; requires IBKR_FLEX_TOKEN + QUERY_ID)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level

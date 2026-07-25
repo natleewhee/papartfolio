@@ -32,6 +32,16 @@ DAILY_REPORT_TIME = "20:30"
 # Portfolio totals are converted to this currency for the combined grand total
 HOME_CURRENCY = "SGD"
 
+# IBKR Flex Web Service (optional — holdings reconciliation after market
+# close). Both must be set for the feature to activate; leave unset to
+# disable it entirely, nothing else breaks. Set up first in IBKR Account
+# Management: Reports > Flex Queries > new "Activity"/"Open Positions" query
+# including at minimum Symbol, Position, Cost Basis Price, Currency, and
+# Asset Category columns, then Reports > Settings > Flex Web Service to
+# generate the token.
+IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
+IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
+
 # Markets to ping open/close for — only fires if you actually hold something
 # in that currency. Times are in each market's own timezone (weekdays only,
 # no holiday calendar).
