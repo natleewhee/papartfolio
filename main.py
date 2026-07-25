@@ -16,12 +16,13 @@ from bot_handlers import (
     cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_schedule, cmd_privacy, cmd_reportstyle,
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert, cmd_alertsupport,
     cmd_support, cmd_resistance, cmd_watch, cmd_unwatch, cmd_watchlist,
-    cmd_earnings,
+    cmd_earnings, cmd_reconcile,
     cmd_help, cmd_start, on_confirmation,
 )
 from telegram_handler import send_daily_report
 from alerts import check_price_alerts
 from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
+from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
 from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 
@@ -131,6 +132,7 @@ def main():
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("earnings", cmd_earnings))
+    app.add_handler(CommandHandler("reconcile", cmd_reconcile))
 
     # Inline Confirm/Cancel buttons for /remove, /update, /clear
     app.add_handler(CallbackQueryHandler(on_confirmation))
@@ -187,6 +189,31 @@ def main():
             name=f"{market['label']} {event}",
             replace_existing=True,
         )
+
+    # IBKR Flex holdings reconciliation — runs 10 min after each market
+    # closes (giving prices/positions a moment to settle). Flex's own EOD
+    # data only refreshes once/day regardless, so the earlier of the two
+    # runs may just reconfirm no changes — harmless, not designed around.
+    # Silently disabled if IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID aren't set.
+    if ibkr_configured():
+        for market_key in ("US", "SG"):
+            market = MARKETS[market_key]
+            hour, minute = market["close"]
+            offset_total_minutes = (hour * 60 + minute + 10) % (24 * 60)
+            close_hour, close_minute = divmod(offset_total_minutes, 60)
+            scheduler.add_job(
+                run_reconciliation,
+                CronTrigger(
+                    hour=close_hour, minute=close_minute,
+                    day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"]),
+                ),
+                id=f"ibkr_reconcile_{market_key.lower()}",
+                name=f"IBKR Reconcile ({market['label']})",
+                replace_existing=True,
+            )
+        logger.info("✅ IBKR Flex reconciliation scheduled (10 min after US + SG close)")
+    else:
+        logger.info("ℹ️ IBKR Flex reconciliation disabled (IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID not set)")
 
     scheduler.start()
     logger.info(f"✅ Scheduler started. Daily report at {report_time} {TIMEZONE} (weekdays), alert checks every 15 min, market open/close pings enabled")
