@@ -232,28 +232,30 @@ def test_format_resistance_compact():
 def test_format_support_table_renders_header_and_rows():
     rows = [
         {
-            "symbol": "AAPL", "currency": "USD", "current_price": 195.0,
+            "symbol": "AAPL", "currency": "USD", "current_price": 195.0, "daily_change_%": 1.3,
             "short_term": {"level": 182.0, "basis": "swing low", "distance_pct": 6.7},
             "mid_term": {"level": 168.0, "basis": "50d MA", "distance_pct": 13.8},
         },
         {
-            "symbol": "MSFT", "currency": "USD", "current_price": 400.0,
+            "symbol": "MSFT", "currency": "USD", "current_price": 400.0, "daily_change_%": None,
             "short_term": None, "mid_term": None,
         },
     ]
     table = format_support_table(rows, fmt_money)
     lines = table.split("\n")
     assert lines[0].startswith("SYMBOL")
+    assert "%CHG" in lines[0]
+    assert "ST%" not in lines[0] and "MT%" not in lines[0]  # dropped: redundant with the near-support flag line
     assert "AAPL" in table and "MSFT" in table
     assert "$195.00" in table
     assert "$182.00" in table
-    assert "-6.7%" in table
-    assert "-13.8%" in table
-    assert "n/a" in table  # MSFT has no ST/MT
+    assert "+1.3%" in table
+    assert "n/a" in table  # MSFT has no ST/MT/daily_change_%
 
 
 def test_format_support_table_handles_missing_price_as_row():
-    rows = [{"symbol": "BAD", "currency": "USD", "current_price": None, "short_term": None, "mid_term": None}]
+    rows = [{"symbol": "BAD", "currency": "USD", "current_price": None, "daily_change_%": None,
+             "short_term": None, "mid_term": None}]
     table = format_support_table(rows, fmt_money)
     assert "BAD" in table
     assert "n/a" in table

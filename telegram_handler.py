@@ -44,26 +44,33 @@ def _build_support_section(metrics):
     if not watched:
         return ""
 
-    # A watchlist symbol you also happen to hold already has a price from
-    # metrics — only fetch a live quote (concurrently) for the rest, so the
-    # report reflects today's actual price rather than yesterday's close.
-    held_price = {h["symbol"]: h["current_price"] for h in metrics["holdings"]}
-    resolved_price = {s: held_price[s] for s in watched if s in held_price}
+    # A watchlist symbol you also happen to hold already has a price + today's
+    # change from metrics — only fetch a live quote (concurrently) for the
+    # rest, so the report reflects today's actual price rather than
+    # yesterday's close.
+    held = {h["symbol"]: h for h in metrics["holdings"]}
+    resolved_price = {s: held[s]["current_price"] for s in watched if s in held}
+    resolved_change_pct = {s: held[s]["daily_change_%"] for s in watched if s in held}
     missing = [s for s in watched if s not in resolved_price]
     if missing:
         quotes = get_prices_bulk(missing)
         for s, pd in quotes.items():
             resolved_price[s] = pd["price"] if pd and pd.get("price") else None
+            resolved_change_pct[s] = pd["change_pct"] if pd and pd.get("change_pct") is not None else None
 
     results = compute_support_levels_bulk((s, resolved_price.get(s)) for s in watched)
 
     rows = []
     for symbol in watched:
         data = results.get(symbol)
+        current_price = resolved_price.get(symbol)
+        if current_price is None and data:
+            current_price = data["current_price"]  # history-derived fallback (yesterday's close)
         rows.append({
             "symbol": symbol,
             "currency": get_currency_for_symbol(symbol),
-            "current_price": data["current_price"] if data else None,
+            "current_price": current_price,
+            "daily_change_%": resolved_change_pct.get(symbol),
             "short_term": data["short_term"] if data else None,
             "mid_term": data["mid_term"] if data else None,
         })
@@ -72,7 +79,7 @@ def _build_support_section(metrics):
     section = (
         "\n📉 *Watchlist — Support Levels*\n"
         f"```\n{table}\n```\n"
-        "_ST=short · MT=mid support (below price) · % = drop to reach it_"
+        "_ST=short · MT=mid support (below price)_"
     )
     flag_line = format_near_support_line(near_support_flags(rows))
     if flag_line:

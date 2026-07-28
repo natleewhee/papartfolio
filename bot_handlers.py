@@ -2,7 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
 import pytz
-from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours
+from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours, get_prices_bulk
 from portfolio_db import (
     add_holding, remove_holding, update_holding,
     get_all_holdings, get_holding, clear_all_holdings,
@@ -736,17 +736,28 @@ async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _support_rows(symbols):
     """Compute support levels for many symbols concurrently and shape them
-    into rows ready for support.format_support_table(). A symbol with
-    unavailable data still gets a row (current_price=None), rendered as a
-    friendly 'n/a' row rather than dropped from the table."""
-    results = compute_support_levels_bulk((s, None) for s in symbols)
+    into rows ready for support.format_support_table(). Fetches a live quote
+    first (concurrently) so PRICE/%CHG reflect today rather than yesterday's
+    close, and ST/MT are computed against that same live price; falls back to
+    the history-derived price if the quote fetch fails. A symbol with no data
+    at all still gets a row (current_price=None), rendered as a friendly
+    'n/a' row rather than dropped from the table."""
+    quotes = get_prices_bulk(symbols)
+    price_by_symbol = {s: (q["price"] if q and q.get("price") else None) for s, q in quotes.items()}
+    change_by_symbol = {s: (q["change_pct"] if q and q.get("change_pct") is not None else None) for s, q in quotes.items()}
+
+    results = compute_support_levels_bulk((s, price_by_symbol.get(s)) for s in symbols)
     rows = []
     for s in symbols:
         data = results.get(s)
+        current_price = price_by_symbol.get(s)
+        if current_price is None and data:
+            current_price = data["current_price"]  # history-derived fallback (yesterday's close)
         rows.append({
             "symbol": s,
             "currency": get_currency_for_symbol(s),
-            "current_price": data["current_price"] if data else None,
+            "current_price": current_price,
+            "daily_change_%": change_by_symbol.get(s),
             "short_term": data["short_term"] if data else None,
             "mid_term": data["mid_term"] if data else None,
         })
@@ -812,7 +823,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👁️ *Watchlist — Support Levels*\n"
         f"```\n{format_support_table(rows, fmt_money)}\n```\n"
-        "_ST=short-term · MT=mid-term support (below price) · % = drop to reach it_"
+        "_ST=short-term · MT=mid-term support (below price)_"
     )
     flag_line = format_near_support_line(near_support_flags(rows))
     if flag_line:
