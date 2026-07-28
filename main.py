@@ -1,4 +1,4 @@
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -17,7 +17,7 @@ from bot_handlers import (
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert, cmd_alertsupport,
     cmd_support, cmd_resistance, cmd_watch, cmd_unwatch, cmd_watchlist,
     cmd_earnings, cmd_reconcile,
-    cmd_help, cmd_start, on_confirmation,
+    cmd_help, cmd_start, cmd_unknown, on_confirmation,
 )
 from telegram_handler import send_daily_report
 from alerts import check_price_alerts
@@ -136,6 +136,11 @@ def main():
 
     # Inline Confirm/Cancel buttons for /remove, /update, /clear
     app.add_handler(CallbackQueryHandler(on_confirmation))
+
+    # Catch-all for any /command that didn't match a handler above — must be
+    # added last, since handlers within a group are checked in registration
+    # order and the first match wins.
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
 
     # Setup scheduler for daily report + periodic alert checks
     scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))

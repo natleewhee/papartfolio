@@ -16,10 +16,14 @@ API call), not something to design around.
 """
 import time
 import logging
+from datetime import datetime
+import pytz
 import xml.etree.ElementTree as ET
 import requests
-from config import IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID
-from portfolio_db import get_all_holdings, add_holding, update_holding, remove_holding
+from config import IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID, HOME_CURRENCY, TIMEZONE
+from portfolio_db import get_all_holdings, add_holding, update_holding, remove_holding, get_setting, set_setting
+from portfolio import calculate_portfolio_metrics
+from fetcher import fetch_fx_rate
 from telegram_handler import send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -31,6 +35,13 @@ GET_STATEMENT_RETRIES = 5
 GET_STATEMENT_RETRY_DELAY_SECONDS = 5
 
 SUPPORTED_CURRENCIES = ("USD", "SGD")  # everything else, the bot can't price
+
+# Flag if the bot's own live price and IBKR's own mark price disagree by more
+# than this — both should be close (bot's is live, IBKR's is EOD), so a
+# bigger gap usually means a feed issue rather than normal bid/ask noise.
+PRICE_DISCREPANCY_THRESHOLD_PCT = 2.0
+
+LAST_RECONCILED_SETTING_KEY = "ibkr_last_reconciled_at"
 
 
 def is_configured():
@@ -97,8 +108,12 @@ def _fetch_statement(reference_code):
 
 def _parse_positions(xml_text):
     """Extract stock positions from a Flex OpenPositions report. Returns a
-    list of {"symbol", "shares", "avg_cost", "currency"}, skipping non-stock
-    rows, rows missing fields we need, and currencies the bot can't price.
+    list of {"symbol", "shares", "avg_cost", "currency", "mark_price",
+    "unrealized_pnl"}, skipping non-stock rows, rows missing fields we need,
+    and currencies the bot can't price. mark_price/unrealized_pnl are None
+    unless the Flex Query includes those optional columns (Mark Price,
+    Unrealized P&L) — the reconciliation still works without them, just
+    without the bot-vs-IBKR pricing cross-check.
     Returns None if the XML can't be parsed at all."""
     try:
         root = ET.fromstring(xml_text)
@@ -136,11 +151,24 @@ def _parse_positions(xml_text):
         if currency == "SGD" and not symbol.upper().endswith(".SI"):
             symbol = f"{symbol.upper()}.SI"
 
+        mark_price = el.get("markPrice")
+        unrealized_pnl = el.get("fifoPnlUnrealized")
+        try:
+            mark_price = float(mark_price) if mark_price not in (None, "") else None
+        except ValueError:
+            mark_price = None
+        try:
+            unrealized_pnl = float(unrealized_pnl) if unrealized_pnl not in (None, "") else None
+        except ValueError:
+            unrealized_pnl = None
+
         positions.append({
             "symbol": symbol.upper(),
             "shares": shares,
             "avg_cost": round(avg_cost, 4),
             "currency": currency,
+            "mark_price": mark_price,
+            "unrealized_pnl": unrealized_pnl,
         })
     return positions
 
@@ -161,6 +189,62 @@ def fetch_flex_positions():
     return positions, None
 
 
+def _compare_pricing(ibkr_positions):
+    """Compare the bot's own live-priced unrealized gain against IBKR's own
+    mark price and unrealized P&L for the same positions — a sanity check on
+    the bot's live pricing feed (Finnhub/yfinance) using the broker's own
+    numbers as ground truth. Both totals are converted to HOME_CURRENCY so
+    mixed USD/SGD positions sum correctly.
+
+    Only meaningful if the Flex Query includes the optional Mark Price /
+    Unrealized P&L columns — returns None otherwise (nothing to compare).
+
+    Returns:
+    {
+        "bot_total_gain": float, "ibkr_total_gain": float,  # HOME_CURRENCY, summed over compared symbols only
+        "mismatches": [{"symbol", "bot_price", "ibkr_price", "diff_pct"}, ...],
+    }
+    """
+    comparable = [p for p in ibkr_positions if p.get("mark_price") is not None]
+    if not comparable:
+        return None
+
+    metrics = calculate_portfolio_metrics(save_snapshot=False)
+    bot_by_symbol = {h["symbol"]: h for h in metrics["holdings"]}
+
+    bot_total_gain = 0.0
+    ibkr_total_gain = 0.0
+    mismatches = []
+
+    for p in comparable:
+        bot_holding = bot_by_symbol.get(p["symbol"])
+        if not bot_holding:
+            continue  # bot couldn't price it this run — nothing to compare
+
+        fx_rate = fetch_fx_rate(p["currency"], HOME_CURRENCY) or 1.0
+        bot_total_gain += bot_holding["unrealized_gain"] * fx_rate
+        if p.get("unrealized_pnl") is not None:
+            ibkr_total_gain += p["unrealized_pnl"] * fx_rate
+
+        bot_price = bot_holding["current_price"]
+        ibkr_price = p["mark_price"]
+        if ibkr_price:
+            diff_pct = abs(bot_price - ibkr_price) / ibkr_price * 100
+            if diff_pct > PRICE_DISCREPANCY_THRESHOLD_PCT:
+                mismatches.append({
+                    "symbol": p["symbol"],
+                    "bot_price": bot_price,
+                    "ibkr_price": ibkr_price,
+                    "diff_pct": round(diff_pct, 1),
+                })
+
+    return {
+        "bot_total_gain": round(bot_total_gain, 2),
+        "ibkr_total_gain": round(ibkr_total_gain, 2),
+        "mismatches": mismatches,
+    }
+
+
 def reconcile_holdings():
     """Fetch real IBKR positions and reconcile the bot's holdings table to
     match: add anything missing, update anything with different shares/cost,
@@ -178,14 +262,15 @@ def reconcile_holdings():
         "updated": [{"symbol", "from": {...}, "to": {...}}, ...],
         "removed": [{"symbol", "shares", "avg_cost", "currency"}, ...],
         "error": str | None,  # only meaningful when status == "fetch_failed"
+        "pricing": dict | None,  # see _compare_pricing(); only meaningful when status == "ok"
     }
     """
     if not is_configured():
-        return {"status": "not_configured", "added": [], "updated": [], "removed": []}
+        return {"status": "not_configured", "added": [], "updated": [], "removed": [], "pricing": None}
 
     ibkr_positions, error = fetch_flex_positions()
     if ibkr_positions is None:
-        return {"status": "fetch_failed", "added": [], "updated": [], "removed": [], "error": error}
+        return {"status": "fetch_failed", "added": [], "updated": [], "removed": [], "error": error, "pricing": None}
 
     current = {h["symbol"]: h for h in get_all_holdings()}
     ibkr_by_symbol = {p["symbol"]: p for p in ibkr_positions}
@@ -196,7 +281,7 @@ def reconcile_holdings():
             f"holds {len(current)} — treating as a likely fetch/parse issue, "
             "not touching holdings."
         )
-        return {"status": "skipped_empty", "added": [], "updated": [], "removed": []}
+        return {"status": "skipped_empty", "added": [], "updated": [], "removed": [], "pricing": None}
 
     added, updated, removed = [], [], []
 
@@ -214,7 +299,9 @@ def reconcile_holdings():
             if remove_holding(symbol):
                 removed.append(existing)
 
-    return {"status": "ok", "added": added, "updated": updated, "removed": removed}
+    pricing = _compare_pricing(ibkr_positions)
+
+    return {"status": "ok", "added": added, "updated": updated, "removed": removed, "pricing": pricing}
 
 
 def _format_summary(result):
@@ -241,20 +328,43 @@ def _format_summary(result):
 
     added, updated, removed = result["added"], result["updated"], result["removed"]
     if not added and not updated and not removed:
-        return "✅ *IBKR Reconciliation*\n\nHoldings already match IBKR — no changes."
+        sync_summary = "✅ *IBKR Reconciliation*\n\nHoldings already match IBKR — no changes."
+    else:
+        lines = ["🔄 *IBKR Reconciliation*", ""]
+        for p in added:
+            lines.append(f"➕ Added {p['symbol']}: {p['shares']} @ {p['avg_cost']:.2f} {p['currency']}")
+        for u in updated:
+            frm, to = u["from"], u["to"]
+            lines.append(
+                f"✏️ Updated {u['symbol']}: {frm['shares']}→{to['shares']} shares, "
+                f"avg cost {frm['avg_cost']:.2f}→{to['avg_cost']:.2f}"
+            )
+        for h in removed:
+            lines.append(f"➖ Removed {h['symbol']} (no longer held)")
+        sync_summary = "\n".join(lines)
 
-    lines = ["🔄 *IBKR Reconciliation*", ""]
-    for p in added:
-        lines.append(f"➕ Added {p['symbol']}: {p['shares']} @ {p['avg_cost']:.2f} {p['currency']}")
-    for u in updated:
-        frm, to = u["from"], u["to"]
-        lines.append(
-            f"✏️ Updated {u['symbol']}: {frm['shares']}→{to['shares']} shares, "
-            f"avg cost {frm['avg_cost']:.2f}→{to['avg_cost']:.2f}"
-        )
-    for h in removed:
-        lines.append(f"➖ Removed {h['symbol']} (no longer held)")
-    return "\n".join(lines)
+    pricing = result.get("pricing")
+    if not pricing:
+        return sync_summary
+
+    pricing_lines = [
+        f"📊 Unrealized gain — Bot: {pricing['bot_total_gain']:+.2f} {HOME_CURRENCY} · "
+        f"IBKR: {pricing['ibkr_total_gain']:+.2f} {HOME_CURRENCY}",
+    ]
+    if pricing["mismatches"]:
+        pricing_lines.append(f"⚠️ Pricing mismatch (>{PRICE_DISCREPANCY_THRESHOLD_PCT:.0f}%):")
+        for m in pricing["mismatches"]:
+            pricing_lines.append(
+                f"  {m['symbol']}: bot {m['bot_price']:.2f} vs IBKR {m['ibkr_price']:.2f} (Δ{m['diff_pct']:.1f}%)"
+            )
+
+    return sync_summary + "\n\n" + "\n".join(pricing_lines)
+
+
+def get_last_reconciled_at():
+    """Human-readable timestamp of the last successful reconciliation (status
+    == 'ok'), or None if it has never completed one."""
+    return get_setting(LAST_RECONCILED_SETTING_KEY)
 
 
 async def run_reconciliation():
@@ -263,6 +373,9 @@ async def run_reconciliation():
     /reconcile for on-demand testing — same code path, same summary."""
     try:
         result = reconcile_holdings()
+        if result["status"] == "ok":
+            now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%d %b %Y, %H:%M") + " SGT"
+            set_setting(LAST_RECONCILED_SETTING_KEY, now)
         summary = _format_summary(result)
         if summary:
             await send_telegram_message(summary)

@@ -20,7 +20,7 @@ from support import (
     near_support_flags, format_near_support_line,
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
-from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
+from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -490,6 +490,19 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines.append(f"  Open {oh:02d}:{om:02d} → {_to_sgt(tz, oh, om)} SGT")
             lines.append(f"  Close {ch:02d}:{cm:02d} → {_to_sgt(tz, ch, cm)} SGT")
+        lines.append("")
+
+    if ibkr_configured():
+        lines.append("*IBKR Reconciliation*")
+        for market in MARKETS.values():
+            ch, cm = market["close"]
+            offset_total = (ch * 60 + cm + 10) % (24 * 60)
+            oh, om = divmod(offset_total, 60)
+            tz = market["timezone"]
+            when = f"{oh:02d}:{om:02d} SGT" if tz == TIMEZONE else f"{_to_sgt(tz, oh, om)} SGT"
+            lines.append(f"  ~{when} (10 min after {market['label']} close)")
+        last_synced = get_last_reconciled_at()
+        lines.append(f"  Last synced: {last_synced if last_synced else 'never yet'}")
         lines.append("")
 
     lines.append("_Weekdays only. Market pings fire only for markets you hold._")
@@ -1093,3 +1106,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "👋 Stock portfolio bot ready!\n\nType /help for commands"
     await update.message.reply_text(msg)
+
+async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback for any /command that doesn't match a registered handler.
+    Must be registered last (see main.py) so real commands take priority."""
+    if not await check_user(update):
+        return
+
+    await update.message.reply_text(
+        "❓ Sorry, I don't know that command. Use /help to see what I can do."
+    )
