@@ -2,7 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
 import pytz
-from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours
+from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours, get_prices_bulk
 from portfolio_db import (
     add_holding, remove_holding, update_holding,
     get_all_holdings, get_holding, clear_all_holdings,
@@ -20,7 +20,7 @@ from support import (
     near_support_flags, format_near_support_line,
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
-from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
+from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
 from telegram_handler import send_daily_report
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -492,6 +492,19 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  Close {ch:02d}:{cm:02d} → {_to_sgt(tz, ch, cm)} SGT")
         lines.append("")
 
+    if ibkr_configured():
+        lines.append("*IBKR Reconciliation*")
+        for market in MARKETS.values():
+            ch, cm = market["close"]
+            offset_total = (ch * 60 + cm + 10) % (24 * 60)
+            oh, om = divmod(offset_total, 60)
+            tz = market["timezone"]
+            when = f"{oh:02d}:{om:02d} SGT" if tz == TIMEZONE else f"{_to_sgt(tz, oh, om)} SGT"
+            lines.append(f"  ~{when} (10 min after {market['label']} close)")
+        last_synced = get_last_reconciled_at()
+        lines.append(f"  Last synced: {last_synced if last_synced else 'never yet'}")
+        lines.append("")
+
     lines.append("_Weekdays only. Market pings fire only for markets you hold._")
     lines.append("_(Price alerts are separate & event-based — see /alerts.)_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -736,17 +749,28 @@ async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _support_rows(symbols):
     """Compute support levels for many symbols concurrently and shape them
-    into rows ready for support.format_support_table(). A symbol with
-    unavailable data still gets a row (current_price=None), rendered as a
-    friendly 'n/a' row rather than dropped from the table."""
-    results = compute_support_levels_bulk((s, None) for s in symbols)
+    into rows ready for support.format_support_table(). Fetches a live quote
+    first (concurrently) so PRICE/%CHG reflect today rather than yesterday's
+    close, and ST/MT are computed against that same live price; falls back to
+    the history-derived price if the quote fetch fails. A symbol with no data
+    at all still gets a row (current_price=None), rendered as a friendly
+    'n/a' row rather than dropped from the table."""
+    quotes = get_prices_bulk(symbols)
+    price_by_symbol = {s: (q["price"] if q and q.get("price") else None) for s, q in quotes.items()}
+    change_by_symbol = {s: (q["change_pct"] if q and q.get("change_pct") is not None else None) for s, q in quotes.items()}
+
+    results = compute_support_levels_bulk((s, price_by_symbol.get(s)) for s in symbols)
     rows = []
     for s in symbols:
         data = results.get(s)
+        current_price = price_by_symbol.get(s)
+        if current_price is None and data:
+            current_price = data["current_price"]  # history-derived fallback (yesterday's close)
         rows.append({
             "symbol": s,
             "currency": get_currency_for_symbol(s),
-            "current_price": data["current_price"] if data else None,
+            "current_price": current_price,
+            "daily_change_%": change_by_symbol.get(s),
             "short_term": data["short_term"] if data else None,
             "mid_term": data["mid_term"] if data else None,
         })
@@ -812,7 +836,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👁️ *Watchlist — Support Levels*\n"
         f"```\n{format_support_table(rows, fmt_money)}\n```\n"
-        "_ST=short-term · MT=mid-term support (below price) · % = drop to reach it_"
+        "_ST=short-term · MT=mid-term support (below price)_"
     )
     flag_line = format_near_support_line(near_support_flags(rows))
     if flag_line:
@@ -1082,3 +1106,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "👋 Stock portfolio bot ready!\n\nType /help for commands"
     await update.message.reply_text(msg)
+
+async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback for any /command that doesn't match a registered handler.
+    Must be registered last (see main.py) so real commands take priority."""
+    if not await check_user(update):
+        return
+
+    await update.message.reply_text(
+        "❓ Sorry, I don't know that command. Use /help to see what I can do."
+    )

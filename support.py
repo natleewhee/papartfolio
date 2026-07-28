@@ -233,30 +233,35 @@ def format_support_compact(data, currency, fmt_money):
 
 
 def format_support_table(rows, fmt_money):
-    """Render support levels as an aligned monospace table — same style as
-    format_holdings_table() in portfolio.py — meant to be wrapped by the
-    caller in a ``` code block so Telegram renders it with a fixed-width font.
+    """Render a compact watchlist table — same style as format_holdings_table()
+    in portfolio.py — meant to be wrapped by the caller in a ``` code block so
+    Telegram renders it with a fixed-width font.
 
-    rows: list of {"symbol", "currency", "current_price", "short_term", "mid_term"}
-    (current_price/short_term/mid_term are None when data was unavailable for
-    that symbol; short_term/mid_term are each None or a level dict with
-    "level" and "distance_pct").
+    Shows today's move rather than ST%/MT% distance-to-support: the near-
+    support flag line already surfaces proximity when it's actually close
+    (see near_support_flags()), so repeating that distance in every row was
+    redundant with it — the raw ST/MT levels are still shown as reference.
+
+    rows: list of {"symbol", "currency", "current_price", "daily_change_%",
+    "short_term", "mid_term"} (current_price/daily_change_%/short_term/
+    mid_term are None when unavailable for that symbol; short_term/mid_term
+    are each None or a level dict with "level").
     `fmt_money` is injected to avoid coupling this module to portfolio.py.
     """
-    header = f"{'SYMBOL':<8}{'PRICE':>10}{'ST':>10}{'ST%':>8}{'MT':>10}{'MT%':>8}"
+    header = f"{'SYMBOL':<8}{'PRICE':>10}{'%CHG':>8}{'ST':>10}{'MT':>10}"
     lines = [header, "-" * len(header)]
     for r in rows:
         if r.get("current_price") is None:
-            lines.append(f"{r['symbol']:<8}{'n/a':>10}{'n/a':>10}{'n/a':>8}{'n/a':>10}{'n/a':>8}")
+            lines.append(f"{r['symbol']:<8}{'n/a':>10}{'n/a':>8}{'n/a':>10}{'n/a':>10}")
             continue
         currency = r["currency"]
         st, mt = r.get("short_term"), r.get("mid_term")
         price_str = fmt_money(r["current_price"], currency)
+        chg = r.get("daily_change_%")
+        chg_str = f"{chg:+.1f}%" if chg is not None else "n/a"
         st_str = fmt_money(st["level"], currency) if st else "n/a"
-        st_pct = f"-{st['distance_pct']:.1f}%" if st else "n/a"
         mt_str = fmt_money(mt["level"], currency) if mt else "n/a"
-        mt_pct = f"-{mt['distance_pct']:.1f}%" if mt else "n/a"
-        lines.append(f"{r['symbol']:<8}{price_str:>10}{st_str:>10}{st_pct:>8}{mt_str:>10}{mt_pct:>8}")
+        lines.append(f"{r['symbol']:<8}{price_str:>10}{chg_str:>8}{st_str:>10}{mt_str:>10}")
     return "\n".join(lines)
 
 
