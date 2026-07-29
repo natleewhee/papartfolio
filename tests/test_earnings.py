@@ -95,6 +95,45 @@ def test_fetch_earnings_old_unreported_past_event_shows_nothing(monkeypatch):
     assert result["last"] is None
 
 
+def test_fetch_earnings_today_unconfirmed_stays_upcoming(monkeypatch):
+    """Today's report date with no actuals yet (e.g. an AMC release still
+    hours away) shouldn't be claimed as 'reported' — a bare date comparison
+    can't tell a not-yet-happened AMC release from an already-done BMO one.
+    It should surface as still-upcoming (days_until=0), not as a past/
+    pending report."""
+    from datetime import date
+    today = date.today()
+    payload = {"earningsCalendar": [
+        {"date": today.isoformat(), "hour": "amc", "epsEstimate": 0.42, "epsActual": None},
+    ]}
+    monkeypatch.setattr("earnings.requests.get", lambda url, params, timeout: _FakeResponse(payload))
+
+    result = fetch_earnings("NBIS")
+
+    assert result["next"] is not None
+    assert result["next"]["days_until"] == 0
+    assert result["last"] is None
+
+
+def test_fetch_earnings_today_confirmed_by_actuals_shows_as_reported(monkeypatch):
+    """Today's date but actuals are ALREADY populated (e.g. a fast BMO
+    turnaround) proves the report already happened — show it as reported
+    with real numbers, not as still-upcoming."""
+    from datetime import date
+    today = date.today()
+    payload = {"earningsCalendar": [
+        {"date": today.isoformat(), "hour": "bmo", "epsEstimate": 0.42, "epsActual": 0.50},
+    ]}
+    monkeypatch.setattr("earnings.requests.get", lambda url, params, timeout: _FakeResponse(payload))
+
+    result = fetch_earnings("NBIS")
+
+    assert result["next"] is None
+    assert result["last"] is not None
+    assert result["last"]["days_since"] == 0
+    assert result["last"]["eps_actual"] == 0.50
+
+
 def test_fetch_earnings_no_data_returns_none(monkeypatch):
     monkeypatch.setattr("earnings.requests.get", lambda url, params, timeout: (_ for _ in ()).throw(RuntimeError("boom")))
     assert fetch_earnings("AAPL") is None
@@ -206,6 +245,12 @@ def test_format_earnings_line_upcoming_unconfirmed_timing():
     next_event = {"date": date(2026, 1, 30), "days_until": 5, "timing": None, "eps_estimate": None}
     line = format_earnings_line("NBIS", "USD", fmt_money, next_event=next_event)
     assert line == "NBIS — in 5d (Fri 30 Jan, timing TBD)"
+
+
+def test_format_earnings_line_reports_today():
+    next_event = {"date": None, "days_until": 0, "timing": "after market close", "eps_estimate": 0.42}
+    line = format_earnings_line("NBIS", "USD", fmt_money, next_event=next_event)
+    assert line == "NBIS — reports today (after market close)"
 
 
 def test_format_earnings_line_recent_with_surprise():
