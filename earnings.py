@@ -116,12 +116,23 @@ def fetch_earnings(symbol):
         return None
 
     today = date.today()
-    upcoming = sorted((e for e in events if e["date"] > today), key=lambda e: e["date"])
-    past = sorted((e for e in events if e["date"] <= today), key=lambda e: e["date"], reverse=True)
+
+    def _happened(e):
+        """Whether this event can be confidently treated as having already
+        occurred. A date before today always has — but a date of *today*
+        only counts once actuals have posted, since a same-day event could
+        be scheduled before market open (already done) or after market
+        close (still hours away) and a bare date comparison can't tell
+        those apart. Actuals being populated is the one signal that proves
+        it already happened, regardless of timing."""
+        return e["date"] < today or (e["date"] == today and e["eps_actual"] is not None)
+
+    reported = sorted((e for e in events if _happened(e)), key=lambda e: e["date"], reverse=True)
+    not_yet_confirmed = sorted((e for e in events if not _happened(e)), key=lambda e: e["date"])
 
     next_event = None
-    if upcoming:
-        e = upcoming[0]
+    if not_yet_confirmed:
+        e = not_yet_confirmed[0]
         next_event = {
             "date": e["date"],
             "days_until": (e["date"] - today).days,
@@ -129,16 +140,17 @@ def fetch_earnings(symbol):
             "eps_estimate": e["eps_estimate"],
         }
 
-    # The most recent past event — regardless of whether its actual EPS has
-    # posted yet. Finnhub often takes hours-to-a-day to backfill epsActual
-    # after the report; treating a pending report as "nothing to show" (the
-    # old behavior) meant a stock could vanish from earnings watch entirely
-    # right when it's most relevant — no longer "upcoming" (date's passed)
-    # but not yet "recent" either, since there were no real figures to key
-    # off of. Surface it as "reported, results pending" instead.
+    # The most recently *confirmed-happened* event — regardless of whether
+    # its actual EPS has posted yet, since Finnhub often takes hours-to-a-day
+    # to backfill epsActual after the report. Treating a pending report as
+    # "nothing to show" (the old behavior) meant a stock could vanish from
+    # earnings watch entirely right when it's most relevant. Surface it as
+    # "reported, results pending" instead — but only once we're sure it
+    # actually happened (see _happened() above), not merely because the
+    # calendar date arrived.
     last_event = None
-    if past:
-        e = past[0]
+    if reported:
+        e = reported[0]
         days_since = (today - e["date"]).days
         if e["eps_actual"] is not None:
             surprise_pct = None
@@ -213,12 +225,18 @@ def format_earnings_line(symbol, currency, fmt_money, next_event=None, last_even
     `fmt_money` is injected to avoid coupling this module to portfolio.py.
     """
     if next_event:
-        when = next_event["date"].strftime("%a %d %b")
         # Finnhub frequently leaves before/after-market timing unconfirmed
         # until closer to the date, especially for smaller/less-followed
         # tickers — say so explicitly rather than silently dropping it,
         # which reads as broken rather than "not yet known".
         timing = next_event["timing"] or "timing TBD"
+        if next_event["days_until"] == 0:
+            # Today's date, but not yet confirmed as having happened (see
+            # fetch_earnings()'s _happened()) — could be a BMO release
+            # already done, or AMC still hours away. Say "reports today"
+            # rather than "in 0d", and never "reported" until we're sure.
+            return f"{symbol} — reports today ({timing})"
+        when = next_event["date"].strftime("%a %d %b")
         return f"{symbol} — in {next_event['days_until']}d ({when}, {timing})"
 
     if last_event:

@@ -999,9 +999,14 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         nxt = data["next"]
         if nxt:
-            when = nxt["date"].strftime("%a %d %b %Y")
             timing = nxt["timing"] or "timing not yet confirmed"
-            lines.append(f"Next report: {when} (in {nxt['days_until']} days, {timing})")
+            if nxt["days_until"] == 0:
+                # Today's date, not yet confirmed as having happened — could
+                # be an already-done BMO release or an AMC still hours away.
+                lines.append(f"Next report: today ({timing})")
+            else:
+                when = nxt["date"].strftime("%a %d %b %Y")
+                lines.append(f"Next report: {when} (in {nxt['days_until']} days, {timing})")
         else:
             lines.append("Next report: not scheduled yet")
 
