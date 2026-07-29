@@ -18,6 +18,7 @@ from bot_handlers import (
     cmd_support, cmd_resistance, cmd_watch, cmd_unwatch, cmd_watchlist,
     cmd_earnings, cmd_reconcile,
     cmd_help, cmd_start, cmd_unknown, on_confirmation,
+    BOT_COMMANDS,
 )
 from telegram_handler import send_daily_report
 from alerts import check_price_alerts
@@ -91,6 +92,15 @@ def _start_keep_alive_pinger():
     threading.Thread(target=_ping_loop, daemon=True).start()
     logger.info(f"✅ Self keep-alive pinger active: GET {url} every {KEEP_ALIVE_INTERVAL_SECONDS // 60} min")
 
+async def _post_init(app: Application):
+    """Register the bot's command list with Telegram so its native "/"
+    autocomplete menu shows every command and filters live as you type
+    (e.g. "/recon" already suggests "/reconcile") — no custom logic needed
+    for that part. Runs once after the Application initializes, before
+    polling starts."""
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    logger.info(f"✅ Registered {len(BOT_COMMANDS)} commands with Telegram for autocomplete")
+
 def main():
     """Start the bot."""
 
@@ -101,7 +111,7 @@ def main():
     init_db()
 
     # Create bot
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).job_queue(None).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).job_queue(None).post_init(_post_init).build()
 
     # Add command handlers
     app.add_handler(CommandHandler("start", cmd_start))

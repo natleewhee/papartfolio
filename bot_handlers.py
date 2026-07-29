@@ -2,6 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
 import pytz
+import difflib
 from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours, get_prices_bulk
 from portfolio_db import (
     add_holding, remove_holding, update_holding,
@@ -27,6 +28,53 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Single source of truth for the bot's command list + short descriptions.
+# Used both to register Telegram's native "/" autocomplete menu (main.py
+# calls bot.set_my_commands() with this at startup — it filters live as you
+# type, e.g. "/recon" already suggests "/reconcile" with no custom logic
+# needed) and to power the "did you mean...?" suggestion in cmd_unknown
+# below. Keep in sync with main.py's CommandHandler registrations.
+BOT_COMMANDS = [
+    ("start", "Start the bot"),
+    ("help", "Show all commands"),
+    ("add", "Add or merge a holding"),
+    ("remove", "Delete a holding"),
+    ("update", "Overwrite a holding"),
+    ("clear", "Delete all holdings"),
+    ("list", "View current portfolio"),
+    ("portfolio", "View current portfolio (alias for /list)"),
+    ("sync", "Manually trigger the daily report"),
+    ("price", "Quick price lookup for any symbol"),
+    ("week", "Portfolio value change, last 7 days"),
+    ("month", "Portfolio value change, last 30 days"),
+    ("export", "Backup holdings as pasteable /add commands"),
+    ("settings", "View all current settings"),
+    ("schedule", "View notification and reconciliation schedule"),
+    ("privacy", "Toggle masking of dollar amounts"),
+    ("reportstyle", "Toggle full vs compact daily report"),
+    ("settime", "Change the daily report time"),
+    ("alert", "Set a price threshold alert"),
+    ("alerts", "List active alerts"),
+    ("unalert", "Cancel an alert"),
+    ("alertsupport", "Alert when price nears support"),
+    ("support", "Support levels for one stock"),
+    ("resistance", "Resistance levels for one stock"),
+    ("watch", "Track a stock's support levels"),
+    ("unwatch", "Stop tracking a watchlist stock"),
+    ("watchlist", "Watched stocks' support levels at a glance"),
+    ("earnings", "Earnings dates and last result"),
+    ("reconcile", "Manually sync holdings from IBKR"),
+]
+
+
+def _suggest_command(attempted, known_commands=None):
+    """Closest registered command name to an unrecognized one the user
+    typed (e.g. 'recon' -> 'reconcile'), or None if nothing is close enough
+    to be a confident suggestion."""
+    known_commands = known_commands if known_commands is not None else [name for name, _ in BOT_COMMANDS]
+    matches = difflib.get_close_matches(attempted, known_commands, n=1, cutoff=0.4)
+    return matches[0] if matches else None
 
 # Inline Yes/Cancel keyboard for destructive-action confirmations. Using
 # callback buttons (rather than a text "reply YES" ConversationHandler) means
@@ -1109,10 +1157,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fallback for any /command that doesn't match a registered handler.
-    Must be registered last (see main.py) so real commands take priority."""
+    Must be registered last (see main.py) so real commands take priority.
+    Telegram's own autocomplete (registered via BOT_COMMANDS in main.py)
+    catches most typos before send; this is the safety net for whatever
+    gets sent anyway — e.g. an old /command from before a rename, or one
+    sent without waiting for the autocomplete popup."""
     if not await check_user(update):
         return
 
-    await update.message.reply_text(
-        "❓ Sorry, I don't know that command. Use /help to see what I can do."
-    )
+    attempted = update.message.text.split()[0].lstrip("/").split("@")[0].lower()
+    suggestion = _suggest_command(attempted)
+    if suggestion:
+        await update.message.reply_text(f"❓ I don't know /{attempted} — did you mean /{suggestion}?")
+    else:
+        await update.message.reply_text(
+            "❓ Sorry, I don't know that command. Use /help to see what I can do."
+        )
