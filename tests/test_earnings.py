@@ -188,6 +188,70 @@ def test_earnings_cache_avoids_refetch(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_cache_ttl_shorter_when_event_is_imminent():
+    from datetime import date, timedelta
+    today = date.today()
+    near = [{"date": today + timedelta(days=1), "timing": None, "eps_estimate": 1.0, "eps_actual": None}]
+    far = [{"date": today + timedelta(days=30), "timing": None, "eps_estimate": 1.0, "eps_actual": None}]
+
+    assert earnings._cache_ttl_for(near) == earnings.EARNINGS_CACHE_TTL_NEAR_SECONDS
+    assert earnings._cache_ttl_for(far) == earnings.EARNINGS_CACHE_TTL_SECONDS
+    assert earnings._cache_ttl_for([]) == earnings.EARNINGS_CACHE_TTL_SECONDS
+
+
+def test_fetch_events_refetches_sooner_when_event_is_imminent(monkeypatch):
+    """A reschedule announced after the last fetch should show up well
+    before the full 24h TTL once the report date is close — this is the
+    reported bug: NBIS rescheduling wasn't reflected because the bot was
+    still trusting a day-old cached snapshot."""
+    from datetime import date, timedelta
+    today = date.today()
+    payload = {"earningsCalendar": [
+        {"date": (today + timedelta(days=1)).isoformat(), "hour": "amc", "epsEstimate": 1.0, "epsActual": None},
+    ]}
+    calls = {"n": 0}
+
+    def fake_get(url, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr("earnings.requests.get", fake_get)
+    # Seeded from the real wall clock, not an arbitrary epoch: date.today() in
+    # this environment derives from time.time(), so faking it to e.g. 1970
+    # would silently corrupt "today" too and break the near/far TTL check.
+    fake_now = [earnings.time.time()]
+    monkeypatch.setattr(earnings.time, "time", lambda: fake_now[0])
+
+    fetch_earnings("AAPL")
+    fake_now[0] += earnings.EARNINGS_CACHE_TTL_NEAR_SECONDS + 1  # past the near TTL, well under the far one
+    fetch_earnings("AAPL")
+
+    assert calls["n"] == 2
+
+
+def test_fetch_events_does_not_refetch_early_when_event_is_far(monkeypatch):
+    from datetime import date, timedelta
+    today = date.today()
+    payload = {"earningsCalendar": [
+        {"date": (today + timedelta(days=30)).isoformat(), "hour": "amc", "epsEstimate": 1.0, "epsActual": None},
+    ]}
+    calls = {"n": 0}
+
+    def fake_get(url, params, timeout):
+        calls["n"] += 1
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr("earnings.requests.get", fake_get)
+    fake_now = [earnings.time.time()]
+    monkeypatch.setattr(earnings.time, "time", lambda: fake_now[0])
+
+    fetch_earnings("AAPL")
+    fake_now[0] += earnings.EARNINGS_CACHE_TTL_NEAR_SECONDS + 1  # past near TTL, still well under far TTL
+    fetch_earnings("AAPL")
+
+    assert calls["n"] == 1  # event isn't imminent — still cached
+
+
 # ---------- earnings_flags ----------
 
 def test_earnings_flags_filters_and_sorts_by_proximity():

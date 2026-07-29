@@ -5,7 +5,10 @@ US tickers use Finnhub's earnings calendar (free tier; already used for
 quotes). Finnhub's international coverage requires a paid plan, so SGX (.SI)
 tickers fall back to yfinance's earnings-dates lookup — the same per-market
 split used for prices/history elsewhere in this bot. Results are cached per
-symbol since earnings dates barely change hour to hour.
+symbol, with an adaptive TTL: a long one normally (dates rarely move while
+they're weeks out), but a short one once an event is imminent, since that's
+exactly when companies confirm exact timing or reschedule — sitting on a
+day-old snapshot in that window is when staleness actually bites.
 """
 import time
 import logging
@@ -19,7 +22,9 @@ from fetcher import _retry, is_sg_ticker
 logger = logging.getLogger(__name__)
 
 _earnings_cache = {}  # symbol -> (fetched_at, events)
-EARNINGS_CACHE_TTL_SECONDS = 24 * 60 * 60  # earnings dates rarely change intraday
+EARNINGS_CACHE_TTL_SECONDS = 24 * 60 * 60       # default: dates rarely move while far out
+EARNINGS_CACHE_TTL_NEAR_SECONDS = 2 * 60 * 60   # once imminent: refresh far more often
+EARNINGS_NEAR_TERM_DAYS = 3                     # "imminent" = within this many days (or today)
 
 UPCOMING_WINDOW_DAYS = 14  # "in the next 2 weeks"
 RECENT_WINDOW_DAYS = 3     # "just released"
@@ -84,11 +89,25 @@ def _fetch_yfinance_earnings(symbol):
     return _retry(_f, f"yfinance earnings fetch for {symbol}")
 
 
+def _cache_ttl_for(events):
+    """How long a cached snapshot of `events` should be trusted for. Short
+    when any event is within EARNINGS_NEAR_TERM_DAYS (imminent — exactly
+    when a company confirms exact timing or reschedules), the normal long
+    TTL otherwise."""
+    today = date.today()
+    for e in events:
+        if 0 <= (e["date"] - today).days <= EARNINGS_NEAR_TERM_DAYS:
+            return EARNINGS_CACHE_TTL_NEAR_SECONDS
+    return EARNINGS_CACHE_TTL_SECONDS
+
+
 def _fetch_events(symbol):
     symbol = symbol.upper()
     cached = _earnings_cache.get(symbol)
-    if cached and (time.time() - cached[0]) < EARNINGS_CACHE_TTL_SECONDS:
-        return cached[1]
+    if cached:
+        fetched_at, cached_events = cached
+        if (time.time() - fetched_at) < _cache_ttl_for(cached_events):
+            return cached_events
 
     events = _fetch_yfinance_earnings(symbol) if is_sg_ticker(symbol) else _fetch_finnhub_calendar(symbol)
     if events is not None:
