@@ -1006,8 +1006,12 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("Next report: not scheduled yet")
 
         lst = data["last"]
-        if lst:
-            actual_str = fmt_money(lst["eps_actual"], currency) if lst["eps_actual"] is not None else "n/a"
+        if lst and lst["eps_actual"] is None:
+            # Date has passed but the data provider hasn't backfilled actual
+            # figures yet — common right after close.
+            lines.append(f"Last quarter: reported {lst['days_since']} days ago, results pending")
+        elif lst:
+            actual_str = fmt_money(lst["eps_actual"], currency)
             if lst["surprise_pct"] is not None and lst["eps_estimate"] is not None:
                 est_str = fmt_money(lst["eps_estimate"], currency)
                 lines.append(

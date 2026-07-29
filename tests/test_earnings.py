@@ -56,14 +56,36 @@ def test_fetch_earnings_finds_next_and_last(monkeypatch):
     assert result["last"]["surprise_pct"] == pytest.approx(3.8, abs=0.1)
 
 
-def test_fetch_earnings_skips_unreported_past_events(monkeypatch):
-    """A past date with epsActual still null (data lag) shouldn't be treated
-    as the 'last reported' quarter."""
+def test_fetch_earnings_recent_unreported_shows_as_pending(monkeypatch):
+    """A recent past date with epsActual still null (Finnhub backfill lag)
+    should surface as 'reported, results pending' rather than vanishing
+    entirely — that's exactly when it's most relevant to see, and a real
+    reported bug: it used to disappear from earnings watch in this window
+    (no longer 'upcoming', not yet 'recent' since there were no figures)."""
     from datetime import date, timedelta
     today = date.today()
     payload = {
         "earningsCalendar": [
-            {"date": (today - timedelta(days=2)).isoformat(), "hour": "amc",
+            {"date": (today - timedelta(days=1)).isoformat(), "hour": "amc",
+             "epsEstimate": 1.0, "epsActual": None},
+        ]
+    }
+    monkeypatch.setattr("earnings.requests.get", lambda url, params, timeout: _FakeResponse(payload))
+
+    result = fetch_earnings("AAPL")
+    assert result["last"] is not None
+    assert result["last"]["days_since"] == 1
+    assert result["last"]["eps_actual"] is None
+
+
+def test_fetch_earnings_old_unreported_past_event_shows_nothing(monkeypatch):
+    """An old past date beyond the recent window with epsActual still null
+    isn't meaningfully 'recent' anymore — genuinely nothing to show."""
+    from datetime import date, timedelta
+    today = date.today()
+    payload = {
+        "earningsCalendar": [
+            {"date": (today - timedelta(days=10)).isoformat(), "hour": "amc",
              "epsEstimate": 1.0, "epsActual": None},
         ]
     }
@@ -197,6 +219,12 @@ def test_format_earnings_line_recent_negative_surprise():
     line = format_earnings_line("ECHO", "USD", fmt_money, last_event=last_event)
     assert "🔴" in line
     assert "-7.4%" in line
+
+
+def test_format_earnings_line_pending_results():
+    last_event = {"date": None, "days_since": 0, "eps_actual": None, "eps_estimate": 2.3, "surprise_pct": None}
+    line = format_earnings_line("NBIS", "USD", fmt_money, last_event=last_event)
+    assert line == "NBIS — reported 0d ago: results pending"
 
 
 def test_format_earnings_line_neither():
