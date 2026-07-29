@@ -129,21 +129,36 @@ def fetch_earnings(symbol):
             "eps_estimate": e["eps_estimate"],
         }
 
+    # The most recent past event — regardless of whether its actual EPS has
+    # posted yet. Finnhub often takes hours-to-a-day to backfill epsActual
+    # after the report; treating a pending report as "nothing to show" (the
+    # old behavior) meant a stock could vanish from earnings watch entirely
+    # right when it's most relevant — no longer "upcoming" (date's passed)
+    # but not yet "recent" either, since there were no real figures to key
+    # off of. Surface it as "reported, results pending" instead.
     last_event = None
-    for e in past:
-        if e["eps_actual"] is None:
-            continue
-        surprise_pct = None
-        if e["eps_estimate"] not in (None, 0):
-            surprise_pct = round((e["eps_actual"] - e["eps_estimate"]) / abs(e["eps_estimate"]) * 100, 1)
-        last_event = {
-            "date": e["date"],
-            "days_since": (today - e["date"]).days,
-            "eps_actual": e["eps_actual"],
-            "eps_estimate": e["eps_estimate"],
-            "surprise_pct": surprise_pct,
-        }
-        break
+    if past:
+        e = past[0]
+        days_since = (today - e["date"]).days
+        if e["eps_actual"] is not None:
+            surprise_pct = None
+            if e["eps_estimate"] not in (None, 0):
+                surprise_pct = round((e["eps_actual"] - e["eps_estimate"]) / abs(e["eps_estimate"]) * 100, 1)
+            last_event = {
+                "date": e["date"],
+                "days_since": days_since,
+                "eps_actual": e["eps_actual"],
+                "eps_estimate": e["eps_estimate"],
+                "surprise_pct": surprise_pct,
+            }
+        elif days_since <= RECENT_WINDOW_DAYS:
+            last_event = {
+                "date": e["date"],
+                "days_since": days_since,
+                "eps_actual": None,
+                "eps_estimate": e["eps_estimate"],
+                "surprise_pct": None,
+            }
 
     return {"symbol": symbol.upper(), "next": next_event, "last": last_event}
 
@@ -210,7 +225,11 @@ def format_earnings_line(symbol, currency, fmt_money, next_event=None, last_even
         eps_actual = last_event["eps_actual"]
         eps_estimate = last_event["eps_estimate"]
         surprise = last_event["surprise_pct"]
-        actual_str = fmt_money(eps_actual, currency) if eps_actual is not None else "n/a"
+        if eps_actual is None:
+            # Date has passed but the data provider hasn't backfilled actual
+            # figures yet — say so plainly rather than a bare "EPS n/a".
+            return f"{symbol} — reported {last_event['days_since']}d ago: results pending"
+        actual_str = fmt_money(eps_actual, currency)
         if surprise is not None and eps_estimate is not None:
             est_str = fmt_money(eps_estimate, currency)
             emoji = "🟢" if surprise >= 0 else "🔴"
