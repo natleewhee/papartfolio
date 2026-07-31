@@ -98,6 +98,17 @@ def init_db():
         if "duplicate column name" not in str(e):
             raise
 
+    # Migration: manual support-level override columns (added after the
+    # original schema). NULL means "auto-compute this horizon" — the
+    # original, still-default behavior.
+    for column in ("manual_st_support", "manual_mt_support"):
+        try:
+            cursor.execute(f"ALTER TABLE watchlist ADD COLUMN {column} REAL")
+            conn.commit()
+        except ValueError as e:
+            if "duplicate column name" not in str(e):
+                raise
+
     conn.close()
     logger.info("✅ Database initialized")
 
@@ -427,3 +438,38 @@ def is_watched(symbol):
     except Exception as e:
         logger.error(f"❌ Error checking watchlist for {symbol}: {e}")
         return False
+
+def set_watchlist_support(symbol, st_support=None, mt_support=None):
+    """Set (or clear, by passing None) manual ST/MT support prices for a
+    watchlist symbol — these override the auto-computed levels for that
+    symbol wherever support is shown or alerted on. Returns True if a row
+    was updated (i.e. the symbol is actually on the watchlist)."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE watchlist SET manual_st_support = ?, manual_mt_support = ? WHERE symbol = ?",
+            (st_support, mt_support, symbol.upper()),
+        )
+        updated = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return updated > 0
+    except Exception as e:
+        logger.error(f"❌ Error setting support levels for {symbol}: {e}")
+        return False
+
+def get_watchlist_entry(symbol):
+    """Fetch one watchlist row (including its manual support levels, if
+    set), or None if the symbol isn't watched."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+        row = cursor.fetchone()
+        result = _rows_to_dicts(cursor, [row])[0] if row else None
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Error fetching watchlist entry for {symbol}: {e}")
+        return None

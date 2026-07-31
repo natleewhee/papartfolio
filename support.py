@@ -216,6 +216,76 @@ def compute_support_levels_bulk(items):
         return dict(pool.map(_one, items))
 
 
+def _manual_level(current_price, manual_price):
+    """A user-supplied support price shaped like an auto-computed one, so
+    downstream formatting/alerts don't need to know the difference."""
+    distance_pct = (current_price - manual_price) / current_price * 100
+    return {"level": round(manual_price, 2), "basis": "manual", "distance_pct": round(distance_pct, 2)}
+
+
+def resolve_support_levels(symbol, current_price=None, manual_st=None, manual_mt=None):
+    """Like compute_support_levels(), but a manual ST/MT price (set via
+    /watch SYMBOL ST MT) always wins over the auto-computed swing/MA level
+    for that horizon — the whole point of setting one manually is that it
+    shouldn't get silently recalculated out from under you. A horizon left
+    unset (None) still falls back to the auto-computed value. Skips the
+    history fetch entirely when both horizons are manual.
+
+    Returns None if there's nothing to show at all: no live price to measure
+    distance from, and (for the auto-fallback path) no usable history either.
+    """
+    if manual_st is not None and manual_mt is not None:
+        if not current_price or current_price <= 0:
+            return None
+        return {
+            "symbol": symbol.upper(),
+            "current_price": round(current_price, 2),
+            "short_term": _manual_level(current_price, manual_st),
+            "mid_term": _manual_level(current_price, manual_mt),
+        }
+
+    data = compute_support_levels(symbol, current_price)
+    if data is None:
+        if (manual_st is None and manual_mt is None) or not current_price or current_price <= 0:
+            return None
+        data = {
+            "symbol": symbol.upper(),
+            "current_price": round(current_price, 2),
+            "short_term": None,
+            "mid_term": None,
+        }
+
+    if manual_st is not None:
+        data["short_term"] = _manual_level(data["current_price"], manual_st)
+    if manual_mt is not None:
+        data["mid_term"] = _manual_level(data["current_price"], manual_mt)
+    return data
+
+
+def resolve_support_levels_bulk(items):
+    """Concurrent resolve_support_levels() for many symbols.
+
+    items: iterable of (symbol, current_price_or_None, manual_st_or_None,
+    manual_mt_or_None) tuples.
+    Returns {symbol: result_or_None} — a per-symbol failure logs and resolves
+    to None rather than failing the whole batch.
+    """
+    items = list(items)
+    if not items:
+        return {}
+
+    def _one(item):
+        symbol, price, manual_st, manual_mt = item
+        try:
+            return symbol, resolve_support_levels(symbol, price, manual_st, manual_mt)
+        except Exception as e:
+            logger.error(f"❌ Error resolving support for {symbol}: {e}")
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
+        return dict(pool.map(_one, items))
+
+
 def format_support_compact(data, currency, fmt_money):
     """One-line summary for the daily report / lists, e.g.
     `AAPL  $195 · ST $182 (-6.7%) · MT $168 (-13.8%)`
