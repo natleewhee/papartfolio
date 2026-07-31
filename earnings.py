@@ -5,10 +5,13 @@ US tickers use Finnhub's earnings calendar (free tier; already used for
 quotes). Finnhub's international coverage requires a paid plan, so SGX (.SI)
 tickers fall back to yfinance's earnings-dates lookup — the same per-market
 split used for prices/history elsewhere in this bot. Results are cached per
-symbol, with an adaptive TTL: a long one normally (dates rarely move while
-they're weeks out), but a short one once an event is imminent, since that's
-exactly when companies confirm exact timing or reschedule — sitting on a
-day-old snapshot in that window is when staleness actually bites.
+symbol with a short flat TTL: reschedules can be announced at any point
+before a report, not just once it's imminent, so freshness can't be gated on
+how close the currently-cached date happens to be — a tiered "long normally,
+short once imminent" TTL tried that and still went stale on reschedules
+announced while the old date was still several days out. Call volume here is
+low (a handful of symbols, checked at most a few times a day), so there's no
+real cost to just refetching often.
 """
 import time
 import logging
@@ -22,9 +25,7 @@ from fetcher import _retry, is_sg_ticker
 logger = logging.getLogger(__name__)
 
 _earnings_cache = {}  # symbol -> (fetched_at, events)
-EARNINGS_CACHE_TTL_SECONDS = 24 * 60 * 60       # default: dates rarely move while far out
-EARNINGS_CACHE_TTL_NEAR_SECONDS = 2 * 60 * 60   # once imminent: refresh far more often
-EARNINGS_NEAR_TERM_DAYS = 3                     # "imminent" = within this many days (or today)
+EARNINGS_CACHE_TTL_SECONDS = 3 * 60 * 60  # flat TTL — reschedules can land any time, not just near the date
 
 UPCOMING_WINDOW_DAYS = 14  # "in the next 2 weeks"
 RECENT_WINDOW_DAYS = 3     # "just released"
@@ -89,24 +90,12 @@ def _fetch_yfinance_earnings(symbol):
     return _retry(_f, f"yfinance earnings fetch for {symbol}")
 
 
-def _cache_ttl_for(events):
-    """How long a cached snapshot of `events` should be trusted for. Short
-    when any event is within EARNINGS_NEAR_TERM_DAYS (imminent — exactly
-    when a company confirms exact timing or reschedules), the normal long
-    TTL otherwise."""
-    today = date.today()
-    for e in events:
-        if 0 <= (e["date"] - today).days <= EARNINGS_NEAR_TERM_DAYS:
-            return EARNINGS_CACHE_TTL_NEAR_SECONDS
-    return EARNINGS_CACHE_TTL_SECONDS
-
-
 def _fetch_events(symbol):
     symbol = symbol.upper()
     cached = _earnings_cache.get(symbol)
     if cached:
         fetched_at, cached_events = cached
-        if (time.time() - fetched_at) < _cache_ttl_for(cached_events):
+        if (time.time() - fetched_at) < EARNINGS_CACHE_TTL_SECONDS:
             return cached_events
 
     events = _fetch_yfinance_earnings(symbol) if is_sg_ticker(symbol) else _fetch_finnhub_calendar(symbol)
