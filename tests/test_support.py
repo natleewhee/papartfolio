@@ -5,6 +5,7 @@ import support
 from support import (
     _sma, _pivots, _horizon_level, _fetch_history,
     compute_support_levels, compute_resistance_levels, compute_support_levels_bulk,
+    resolve_support_levels, resolve_support_levels_bulk,
     format_support_compact, format_resistance_compact, format_support_table,
     near_support_flags, format_near_support_line,
 )
@@ -197,6 +198,94 @@ def test_compute_support_levels_bulk_isolates_failures(monkeypatch):
 
 def test_compute_support_levels_bulk_empty():
     assert compute_support_levels_bulk([]) == {}
+
+
+# ---------- resolve_support_levels (manual override) ----------
+
+def test_resolve_support_levels_uses_manual_when_both_given(monkeypatch):
+    def fail_if_called(symbol, current_price=None):
+        raise AssertionError("should not fetch/compute when both horizons are manual")
+    monkeypatch.setattr(support, "compute_support_levels", fail_if_called)
+
+    result = resolve_support_levels("AAPL", current_price=100.0, manual_st=90.0, manual_mt=80.0)
+
+    assert result["symbol"] == "AAPL"
+    assert result["short_term"] == {"level": 90.0, "basis": "manual", "distance_pct": 10.0}
+    assert result["mid_term"] == {"level": 80.0, "basis": "manual", "distance_pct": 20.0}
+
+
+def test_resolve_support_levels_both_manual_needs_a_price():
+    assert resolve_support_levels("AAPL", current_price=None, manual_st=90.0, manual_mt=80.0) is None
+
+
+def test_resolve_support_levels_falls_back_to_auto_for_unset_horizon(monkeypatch):
+    def fake_compute(symbol, current_price=None):
+        return {
+            "symbol": symbol,
+            "current_price": current_price,
+            "short_term": {"level": 95.0, "basis": "swing low", "distance_pct": 5.0},
+            "mid_term": {"level": 85.0, "basis": "50d MA", "distance_pct": 15.0},
+        }
+    monkeypatch.setattr(support, "compute_support_levels", fake_compute)
+
+    result = resolve_support_levels("AAPL", current_price=100.0, manual_st=90.0, manual_mt=None)
+
+    assert result["short_term"] == {"level": 90.0, "basis": "manual", "distance_pct": 10.0}
+    assert result["mid_term"] == {"level": 85.0, "basis": "50d MA", "distance_pct": 15.0}  # untouched
+
+
+def test_resolve_support_levels_no_manual_is_pure_auto(monkeypatch):
+    def fake_compute(symbol, current_price=None):
+        return {"symbol": symbol, "current_price": current_price, "short_term": None, "mid_term": None}
+    monkeypatch.setattr(support, "compute_support_levels", fake_compute)
+
+    result = resolve_support_levels("AAPL", current_price=100.0)
+
+    assert result == {"symbol": "AAPL", "current_price": 100.0, "short_term": None, "mid_term": None}
+
+
+def test_resolve_support_levels_manual_survives_no_history(monkeypatch):
+    """A manually-pinned symbol should still show its manual level even if
+    there's not enough price history for the auto-computed horizon."""
+    monkeypatch.setattr(support, "compute_support_levels", lambda symbol, current_price=None: None)
+
+    result = resolve_support_levels("NEWCO", current_price=100.0, manual_st=90.0, manual_mt=None)
+
+    assert result["short_term"] == {"level": 90.0, "basis": "manual", "distance_pct": 10.0}
+    assert result["mid_term"] is None
+
+
+def test_resolve_support_levels_no_data_and_no_manual_returns_none(monkeypatch):
+    monkeypatch.setattr(support, "compute_support_levels", lambda symbol, current_price=None: None)
+    assert resolve_support_levels("BAD", current_price=100.0) is None
+
+
+def test_resolve_support_levels_bulk_returns_per_symbol_results(monkeypatch):
+    def fake_resolve(symbol, current_price=None, manual_st=None, manual_mt=None):
+        return {"symbol": symbol, "current_price": current_price, "short_term": None, "mid_term": None}
+    monkeypatch.setattr(support, "resolve_support_levels", fake_resolve)
+
+    results = resolve_support_levels_bulk([("AAPL", 100.0, None, None), ("MSFT", 200.0, 190.0, 180.0)])
+
+    assert results["AAPL"]["current_price"] == 100.0
+    assert results["MSFT"]["current_price"] == 200.0
+
+
+def test_resolve_support_levels_bulk_isolates_failures(monkeypatch):
+    def flaky_resolve(symbol, current_price=None, manual_st=None, manual_mt=None):
+        if symbol == "BAD":
+            raise RuntimeError("boom")
+        return {"symbol": symbol, "current_price": 1, "short_term": None, "mid_term": None}
+    monkeypatch.setattr(support, "resolve_support_levels", flaky_resolve)
+
+    results = resolve_support_levels_bulk([("AAPL", None, None, None), ("BAD", None, None, None)])
+
+    assert results["AAPL"] is not None
+    assert results["BAD"] is None
+
+
+def test_resolve_support_levels_bulk_empty():
+    assert resolve_support_levels_bulk([]) == {}
 
 
 # ---------- formatting ----------

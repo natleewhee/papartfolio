@@ -1,7 +1,7 @@
-from portfolio_db import get_active_alerts, deactivate_alert
+from portfolio_db import get_active_alerts, deactivate_alert, get_watchlist_entry
 from fetcher import get_price, get_currency_for_symbol
 from portfolio import fmt_money
-from support import compute_support_levels
+from support import resolve_support_levels
 from telegram_handler import send_telegram_message
 import logging
 
@@ -51,8 +51,18 @@ async def _check_threshold_alert(alert):
 async def _check_support_alert(alert):
     """direction is 'near_support': threshold is a percent proximity — trigger
     when price comes within that percent of either the short- or mid-term
-    support level (whichever is closer)."""
-    data = compute_support_levels(alert["symbol"])
+    support level (whichever is closer). A watchlist symbol with manual
+    ST/MT levels (set via /watch SYMBOL ST MT) checks against those instead
+    of the auto-computed ones."""
+    symbol = alert["symbol"]
+    price_data = get_price(symbol)
+    current_price = price_data["price"] if price_data and price_data.get("price") else None
+
+    entry = get_watchlist_entry(symbol)
+    manual_st = entry.get("manual_st_support") if entry else None
+    manual_mt = entry.get("manual_mt_support") if entry else None
+
+    data = resolve_support_levels(symbol, current_price, manual_st, manual_mt)
     if not data:
         return
 

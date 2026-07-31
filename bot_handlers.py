@@ -10,13 +10,15 @@ from portfolio_db import (
     get_setting, set_setting,
     create_alert, get_active_alerts, deactivate_alert, find_active_alert, update_alert_threshold,
     add_to_watchlist, remove_from_watchlist, get_watchlist, is_watched,
+    set_watchlist_support, get_watchlist_entry,
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
     fmt_money,
 )
 from support import (
-    compute_support_levels, compute_support_levels_bulk, compute_resistance_levels,
+    compute_support_levels, compute_resistance_levels,
+    resolve_support_levels, resolve_support_levels_bulk,
     format_support_table, format_resistance_compact,
     near_support_flags, format_near_support_line,
 )
@@ -60,7 +62,7 @@ BOT_COMMANDS = [
     ("alertsupport", "Alert when price nears support"),
     ("support", "Support levels for one stock"),
     ("resistance", "Resistance levels for one stock"),
-    ("watch", "Track a stock's support levels"),
+    ("watch", "Track a stock's support levels (auto or your own ST/MT)"),
     ("unwatch", "Stop tracking a watchlist stock"),
     ("watchlist", "Watched stocks' support levels at a glance"),
     ("earnings", "Earnings dates and last result"),
@@ -795,21 +797,30 @@ async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in /alertsupport: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
-def _support_rows(symbols):
-    """Compute support levels for many symbols concurrently and shape them
-    into rows ready for support.format_support_table(). Fetches a live quote
-    first (concurrently) so PRICE/%CHG reflect today rather than yesterday's
-    close, and ST/MT are computed against that same live price; falls back to
-    the history-derived price if the quote fetch fails. A symbol with no data
-    at all still gets a row (current_price=None), rendered as a friendly
-    'n/a' row rather than dropped from the table."""
+def _support_rows(watchlist_rows):
+    """Resolve support levels for many watchlist entries concurrently and
+    shape them into rows ready for support.format_support_table(). Fetches a
+    live quote first (concurrently) so PRICE/%CHG reflect today rather than
+    yesterday's close, and ST/MT are resolved against that same live price;
+    falls back to the history-derived price if the quote fetch fails. A
+    symbol with no data at all still gets a row (current_price=None),
+    rendered as a friendly 'n/a' row rather than dropped from the table.
+
+    watchlist_rows: list of dicts as returned by get_watchlist() — a row's
+    own manual_st_support/manual_mt_support (set via /watch SYMBOL ST MT)
+    wins over the auto-computed level for that horizon."""
+    symbols = [w["symbol"] for w in watchlist_rows]
     quotes = get_prices_bulk(symbols)
     price_by_symbol = {s: (q["price"] if q and q.get("price") else None) for s, q in quotes.items()}
     change_by_symbol = {s: (q["change_pct"] if q and q.get("change_pct") is not None else None) for s, q in quotes.items()}
 
-    results = compute_support_levels_bulk((s, price_by_symbol.get(s)) for s in symbols)
+    results = resolve_support_levels_bulk(
+        (w["symbol"], price_by_symbol.get(w["symbol"]), w.get("manual_st_support"), w.get("manual_mt_support"))
+        for w in watchlist_rows
+    )
     rows = []
-    for s in symbols:
+    for w in watchlist_rows:
+        s = w["symbol"]
         data = results.get(s)
         current_price = price_by_symbol.get(s)
         if current_price is None and data:
@@ -825,30 +836,72 @@ def _support_rows(symbols):
     return rows
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /watch SYMBOL — track a stock's support levels without holding it"""
+    """Handle /watch SYMBOL [ST MT] — track a stock's support levels, without
+    holding it. With no numbers, ST/MT are auto-computed from swing points
+    and moving averages and keep recalculating as price history moves. Give
+    ST and MT prices to pin them to your own numbers instead — re-running
+    /watch on an already-watched symbol updates its manual levels, and
+    /watch SYMBOL auto clears them back to auto-compute."""
     if not await check_user(update):
         return
 
     parts = update.message.text.split()
-    if len(parts) != 2:
+    if len(parts) not in (2, 3, 4):
         await update.message.reply_text(
             "❌ Invalid format\n\n"
-            "Usage: /watch SYMBOL\n"
-            "Example: /watch AAPL (SG stocks: /watch D05.SI)"
+            "Usage: /watch SYMBOL [ST MT]\n"
+            "Example: /watch AAPL — auto-computed support levels\n"
+            "Example: /watch AAPL 182 168 — pin ST/MT to your own prices\n"
+            "Example: /watch AAPL auto — clear manual levels, back to auto-compute"
         )
         return
 
     symbol = parts[1].upper()
+
+    manual_st = manual_mt = None
+    clearing = False
+    if len(parts) == 3:
+        if parts[2].lower() != "auto":
+            await update.message.reply_text(
+                "❌ Give both ST and MT together, e.g. /watch AAPL 182 168\n"
+                "(or /watch AAPL auto to clear manual levels)"
+            )
+            return
+        clearing = True
+    elif len(parts) == 4:
+        try:
+            manual_st = float(parts[2])
+            manual_mt = float(parts[3])
+        except ValueError:
+            await update.message.reply_text("❌ ST and MT must be numbers")
+            return
+        if manual_st <= 0 or manual_mt <= 0:
+            await update.message.reply_text("❌ ST and MT must be positive")
+            return
+
     status = await update.message.reply_text(f"🔍 Validating {symbol}...")
     if not validate_symbol(symbol):
         await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
         await _delete_quietly(status)
         return
 
-    if add_to_watchlist(symbol):
-        await update.message.reply_text(f"👁️ Added {symbol} to your watchlist")
-    else:
+    already_watched = is_watched(symbol)
+    add_to_watchlist(symbol)  # no-op if already there
+
+    if clearing:
+        set_watchlist_support(symbol, None, None)
+        await update.message.reply_text(f"👁️ {symbol} — back to auto-computed support levels")
+    elif manual_st is not None:
+        set_watchlist_support(symbol, manual_st, manual_mt)
+        currency = get_currency_for_symbol(symbol)
+        await update.message.reply_text(
+            f"👁️ {symbol} — support levels set: "
+            f"ST {fmt_money(manual_st, currency)}, MT {fmt_money(manual_mt, currency)}"
+        )
+    elif already_watched:
         await update.message.reply_text(f"ℹ️ {symbol} is already on your watchlist")
+    else:
+        await update.message.reply_text(f"👁️ Added {symbol} to your watchlist")
     await _delete_quietly(status)
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -875,12 +928,13 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     watched = get_watchlist()
     if not watched:
         await update.message.reply_text(
-            "📭 Watchlist is empty. Use /watch SYMBOL to track a stock's support levels."
+            "📭 Watchlist is empty. Use /watch SYMBOL to track a stock's support levels "
+            "(or /watch SYMBOL ST MT to pin your own)."
         )
         return
 
     status = await update.message.reply_text("🔄 Computing support levels...")
-    rows = _support_rows([w["symbol"] for w in watched])
+    rows = _support_rows(watched)
     msg = (
         "👁️ *Watchlist — Support Levels*\n"
         f"```\n{format_support_table(rows, fmt_money)}\n```\n"
@@ -912,7 +966,12 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = parts[1].upper()
     status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
     currency = get_currency_for_symbol(symbol)
-    data = compute_support_levels(symbol)
+    price_data = get_price(symbol)
+    current_price = price_data["price"] if price_data and price_data.get("price") else None
+    entry = get_watchlist_entry(symbol)
+    manual_st = entry.get("manual_st_support") if entry else None
+    manual_mt = entry.get("manual_mt_support") if entry else None
+    data = resolve_support_levels(symbol, current_price, manual_st, manual_mt)
     if not data:
         await update.message.reply_text(
             f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."

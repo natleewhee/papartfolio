@@ -4,7 +4,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk, fetch_extended_hours_bulk
-from support import compute_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
+from support import resolve_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
 from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
 from datetime import datetime
 import pytz
@@ -40,9 +40,11 @@ def _build_support_section(metrics):
     its support levels; that's now a deliberate /watch action. Support levels
     are public market prices (not portfolio values), so they're shown even in
     privacy mode. Returns "" if the watchlist is empty."""
-    watched = [w["symbol"] for w in get_watchlist()]
-    if not watched:
+    watchlist_rows = get_watchlist()
+    if not watchlist_rows:
         return ""
+    watched = [w["symbol"] for w in watchlist_rows]
+    manual_by_symbol = {w["symbol"]: (w.get("manual_st_support"), w.get("manual_mt_support")) for w in watchlist_rows}
 
     # A watchlist symbol you also happen to hold already has a price + today's
     # change from metrics — only fetch a live quote (concurrently) for the
@@ -58,7 +60,9 @@ def _build_support_section(metrics):
             resolved_price[s] = pd["price"] if pd and pd.get("price") else None
             resolved_change_pct[s] = pd["change_pct"] if pd and pd.get("change_pct") is not None else None
 
-    results = compute_support_levels_bulk((s, resolved_price.get(s)) for s in watched)
+    results = resolve_support_levels_bulk(
+        (s, resolved_price.get(s), *manual_by_symbol[s]) for s in watched
+    )
 
     rows = []
     for symbol in watched:
