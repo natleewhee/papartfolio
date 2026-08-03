@@ -117,6 +117,19 @@ def test_parse_positions_sg_symbol_already_has_suffix_not_doubled():
     assert positions[0]["symbol"] == "D05.SI"
 
 
+def test_parse_positions_keeps_fractional_shares():
+    """A fractional position (DRIP, fractional-share brokers) used to be
+    truncated to an int via int(float(position)), silently understating
+    value/gain and re-flagging a spurious 'updated' diff on every future
+    reconciliation."""
+    xml = _flex_xml(
+        '<OpenPosition accountId="U123" currency="USD" assetCategory="STK" symbol="AAPL" '
+        'position="12.734" costBasisPrice="148.10" />',
+    )
+    positions = _parse_positions(xml)
+    assert positions[0]["shares"] == pytest.approx(12.734)
+
+
 # ---------- _request_statement / _fetch_statement ----------
 
 class _FakeResponse:
@@ -287,6 +300,43 @@ def test_reconcile_no_changes_when_everything_matches(monkeypatch):
     assert result == {"status": "ok", "added": [], "updated": [], "removed": [], "pricing": None}
 
 
+def test_reconcile_tolerates_float_noise_on_fractional_shares(monkeypatch):
+    """Shares are now a float (see test_parse_positions_keeps_fractional_shares)
+    — an exact != comparison would flap on harmless float storage/round-trip
+    noise the same way avg_cost's own tolerance already guards against."""
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (
+        [{"symbol": "AAPL", "shares": 12.734, "avg_cost": 148.1, "currency": "USD"}], None,
+    ))
+    monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
+        {"symbol": "AAPL", "shares": 12.73400001, "avg_cost": 148.1, "currency": "USD"},
+    ])
+    update_calls = []
+    monkeypatch.setattr(ibkr_flex, "update_holding", lambda *a, **k: update_calls.append(a))
+
+    result = reconcile_holdings()
+
+    assert result["updated"] == []
+    assert update_calls == []
+
+
+def test_reconcile_updates_on_real_fractional_share_change(monkeypatch):
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (
+        [{"symbol": "AAPL", "shares": 12.734, "avg_cost": 148.1, "currency": "USD"}], None,
+    ))
+    monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
+        {"symbol": "AAPL", "shares": 10.0, "avg_cost": 148.1, "currency": "USD"},
+    ])
+    monkeypatch.setattr(ibkr_flex, "update_holding", lambda *a, **k: True)
+
+    result = reconcile_holdings()
+
+    assert [u["symbol"] for u in result["updated"]] == ["AAPL"]
+
+
 # ---------- _format_summary ----------
 
 def test_format_summary_not_configured_returns_none():
@@ -313,6 +363,22 @@ def test_format_summary_skipped_empty():
 def test_format_summary_no_changes():
     msg = _format_summary({"status": "ok", "added": [], "updated": [], "removed": []})
     assert "already match" in msg
+
+
+def test_format_summary_formats_shares_without_trailing_zero():
+    result = {
+        "status": "ok",
+        "added": [{"symbol": "AAPL", "shares": 15.0, "avg_cost": 148.1, "currency": "USD"}],
+        "updated": [{
+            "symbol": "MSFT",
+            "from": {"shares": 10.0, "avg_cost": 400.0},
+            "to": {"shares": 12.734, "avg_cost": 400.0},
+        }],
+        "removed": [],
+    }
+    msg = _format_summary(result)
+    assert "15 @" in msg  # not "15.0 @"
+    assert "10→12.734 shares" in msg
 
 
 def test_format_summary_with_changes():

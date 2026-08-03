@@ -15,14 +15,24 @@ real cost to just refetching often.
 """
 import time
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+import pytz
 import requests
 import yfinance
-from config import FINNHUB_API_KEY
+from config import FINNHUB_API_KEY, TIMEZONE
 from fetcher import _retry, is_sg_ticker
 
 logger = logging.getLogger(__name__)
+
+
+def _today():
+    """SGT-aware 'today' (Render runs UTC). A same-day BMO/AMC release check
+    needs to agree with the user's own clock — plain date.today() returns the
+    wrong day for roughly a third of the SGT calendar day (00:00-08:00 SGT is
+    still "yesterday" in UTC)."""
+    return datetime.now(pytz.timezone(TIMEZONE)).date()
+
 
 _earnings_cache = {}  # symbol -> (fetched_at, events)
 EARNINGS_CACHE_TTL_SECONDS = 3 * 60 * 60  # flat TTL — reschedules can land any time, not just near the date
@@ -42,7 +52,7 @@ def _fetch_finnhub_calendar(symbol):
     either side of today (enough to catch the last reported quarter and the
     next one at a typical ~90-day cadence)."""
     def _f():
-        today = date.today()
+        today = _today()
         params = {
             "symbol": symbol.upper(),
             "from": (today - timedelta(days=100)).isoformat(),
@@ -123,7 +133,7 @@ def fetch_earnings(symbol):
     if events is None:
         return None
 
-    today = date.today()
+    today = _today()
 
     def _happened(e):
         """Whether this event can be confidently treated as having already

@@ -2,6 +2,7 @@ from portfolio import calculate_portfolio_metrics, format_holdings_table, fmt_mo
 from portfolio_db import get_setting
 from telegram_handler import send_telegram_message
 from config import MARKETS
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ async def send_market_notification(market_key, event):
         market = MARKETS[market_key]
         currency = market["currency"]
 
-        metrics = calculate_portfolio_metrics(save_snapshot=False)
+        metrics = await asyncio.to_thread(calculate_portfolio_metrics, save_snapshot=False)
         holdings = [h for h in metrics["holdings"] if h["currency"] == currency]
         if not holdings:
             return

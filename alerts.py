@@ -3,6 +3,7 @@ from fetcher import get_price, get_currency_for_symbol
 from portfolio import fmt_money
 from support import resolve_support_levels
 from telegram_handler import send_telegram_message
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ async def check_price_alerts():
 
 async def _check_threshold_alert(alert):
     """direction is 'above' or 'below': threshold is a fixed price."""
-    price_data = get_price(alert["symbol"])
+    price_data = await asyncio.to_thread(get_price, alert["symbol"])
     if not price_data or not price_data["price"]:
         return
 
@@ -55,14 +56,14 @@ async def _check_support_alert(alert):
     ST/MT levels (set via /watch SYMBOL ST MT) checks against those instead
     of the auto-computed ones."""
     symbol = alert["symbol"]
-    price_data = get_price(symbol)
+    price_data = await asyncio.to_thread(get_price, symbol)
     current_price = price_data["price"] if price_data and price_data.get("price") else None
 
     entry = get_watchlist_entry(symbol)
     manual_st = entry.get("manual_st_support") if entry else None
     manual_mt = entry.get("manual_mt_support") if entry else None
 
-    data = resolve_support_levels(symbol, current_price, manual_st, manual_mt)
+    data = await asyncio.to_thread(resolve_support_levels, symbol, current_price, manual_st, manual_mt)
     if not data:
         return
 

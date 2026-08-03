@@ -17,12 +17,16 @@ def init_db():
     conn = _connect()
     cursor = conn.cursor()
     
-    # Holdings table
+    # Holdings table. shares is REAL, not INTEGER — fractional share counts
+    # are real (DRIP, fractional-share brokers, IBKR reconciliation). SQLite's
+    # dynamic typing already stored fractional values fine even under the old
+    # INTEGER declaration, so no migration is needed for existing databases —
+    # this only makes the declared type match what's actually stored.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS holdings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol TEXT NOT NULL UNIQUE,
-            shares INTEGER NOT NULL,
+            shares REAL NOT NULL,
             avg_cost REAL NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

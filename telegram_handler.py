@@ -1,3 +1,4 @@
+import asyncio
 import requests
 from telegram.ext import ContextTypes
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
@@ -12,27 +13,80 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+def chunk_message(text, limit=TELEGRAM_MESSAGE_LIMIT):
+    """Split `text` into Telegram-safe chunks, breaking on line boundaries so
+    a line doesn't get sliced in half. A large enough portfolio/watchlist
+    would otherwise build a single message Telegram rejects outright for
+    being over the ~4096-char limit, silently dropping it. A single
+    pathologically long line (longer than `limit` on its own) is hard-cut as
+    a last resort."""
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = []
+    current_len = 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1  # +1 for the newline that'll rejoin it
+        if current and current_len + line_len > limit:
+            chunks.append("\n".join(current))
+            current, current_len = [], 0
+        if line_len - 1 > limit:
+            for i in range(0, len(line), limit):
+                chunks.append(line[i:i + limit])
+            continue
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
 async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
-    """Send message via Telegram Bot API."""
+    """Send a message via the Telegram Bot API.
+
+    Runs the (blocking) HTTP call off the event loop — this bot's own
+    scheduler and Telegram long-polling share that loop, so a slow send
+    would otherwise stall both. Falls back to a plain-text retry if Telegram
+    rejects the message for a Markdown parse error (a stray `_`/`*` in a
+    symbol or error string, most likely from IBKR-sourced data that never
+    goes through this bot's own symbol validation) — this bot's only
+    interface is Telegram messages, so a formatting glitch shouldn't
+    silently swallow the whole thing. Long messages are chunked so a big
+    enough portfolio/watchlist doesn't get rejected outright for exceeding
+    Telegram's per-message length limit.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    payload = {
-        "chat_id": TELEGRAM_USER_ID,
-        "text": text,
-        "parse_mode": parse_mode,
-    }
+    async def _send(chunk, mode):
+        payload = {"chat_id": TELEGRAM_USER_ID, "text": chunk}
+        if mode:
+            payload["parse_mode"] = mode
+        return await asyncio.to_thread(requests.post, url, json=payload, timeout=10)
 
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            logger.info("✅ Message sent to Telegram")
-            return True
-        else:
+    ok = True
+    for chunk in chunk_message(text):
+        try:
+            response = await _send(chunk, parse_mode)
+            if response.status_code == 200:
+                continue
+
+            if parse_mode and "can't parse entities" in response.text.lower():
+                logger.warning("⚠️ Markdown parse error sending Telegram message — retrying this chunk as plain text")
+                response = await _send(chunk, None)
+                if response.status_code == 200:
+                    continue
+
             logger.error(f"❌ Telegram API error: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Error sending message: {e}")
-        return False
+            ok = False
+        except Exception as e:
+            logger.error(f"❌ Error sending message: {e}")
+            ok = False
+
+    if ok:
+        logger.info("✅ Message sent to Telegram")
+    return ok
 
 def _build_support_section(metrics):
     """Compact support table for the daily report, covering only stocks
@@ -149,8 +203,9 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         privacy = get_setting("privacy_mode", "0") == "1"
         compact = get_setting("report_style", "full") == "compact"
 
-        # Calculate metrics
-        metrics = calculate_portfolio_metrics()
+        # Calculate metrics (blocking network calls — off the event loop,
+        # which this scheduler shares with Telegram's own long polling)
+        metrics = await asyncio.to_thread(calculate_portfolio_metrics)
 
         if not metrics["holdings"]:
             msg = "📭 Portfolio is empty. Use /add to add holdings."
@@ -194,15 +249,15 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         if not compact:
             report += "\n" + f"```\n{format_holdings_table(metrics['holdings'], privacy)}\n```"
 
-        extended_hours_section = _build_extended_hours_section(metrics, privacy)
+        extended_hours_section = await asyncio.to_thread(_build_extended_hours_section, metrics, privacy)
         if extended_hours_section:
             report += "\n" + extended_hours_section
 
-        earnings_section = _build_earnings_section(metrics)
+        earnings_section = await asyncio.to_thread(_build_earnings_section, metrics)
         if earnings_section:
             report += "\n" + earnings_section
 
-        support_section = _build_support_section(metrics)
+        support_section = await asyncio.to_thread(_build_support_section, metrics)
         if support_section:
             report += "\n" + support_section
 

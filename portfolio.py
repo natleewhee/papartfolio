@@ -16,6 +16,14 @@ def _today():
 
 CURRENCY_SYMBOLS = {"USD": "$", "SGD": "S$"}
 
+def format_shares(shares):
+    """Render a share count without a spurious trailing '.0' for the common
+    whole-share case, while still showing full precision for fractional
+    shares (e.g. IBKR DRIP/fractional positions)."""
+    if shares == int(shares):
+        return str(int(shares))
+    return f"{shares:.4f}".rstrip("0").rstrip(".")
+
 def fmt_money(value, currency="USD", privacy=False, show_sign=False, decimals=2):
     """Format an amount in its own currency (sign before the symbol, e.g. -S$38.00),
     or mask it entirely when privacy mode is on."""
@@ -45,8 +53,11 @@ def format_holdings_table(holdings, privacy=False):
         price_str = fmt_money(h["current_price"], currency, privacy, decimals=2)
         cost_str = fmt_money(h["cost_basis"], currency, privacy, decimals=0)
         value_str = fmt_money(h["current_value"], currency, privacy, decimals=0)
-        gain_str = "•••" if privacy else f"{h['unrealized_gain_pct']:+.1f}%"
-        pct_str = "•••" if privacy else f"{h['daily_change_%']:+.1f}%"
+        # Percentages stay visible in privacy mode — only $ amounts are
+        # masked (matches /privacy's own documented behavior, and how /list
+        # and the market-open/close pings already treat these same figures).
+        gain_str = f"{h['unrealized_gain_pct']:+.1f}%"
+        pct_str = f"{h['daily_change_%']:+.1f}%"
         lines.append(
             f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{gain_str:>8}{pct_str:>8}"
         )
@@ -263,6 +274,13 @@ def get_period_performance(days):
     """
     Compare current portfolio value against the earliest snapshot on/after
     `days` ago. Returns None if there isn't a snapshot old enough yet.
+
+    The raw value change conflates market performance with deposits/
+    withdrawals — adding a new position mid-period would otherwise show up
+    entirely as "gain". net_contribution approximates that as the change in
+    total cost basis since the start snapshot (new holdings add to it,
+    removed ones subtract from it) and backs it out of the reported change,
+    so this reflects investment performance, not account funding activity.
     """
     cutoff = (_today() - timedelta(days=days)).strftime("%Y-%m-%d")
     start = get_earliest_aggregate_since(cutoff)
@@ -271,7 +289,8 @@ def get_period_performance(days):
 
     current = calculate_portfolio_metrics(save_snapshot=False)
     start_value = start["total_value"]
-    change = current["total_value"] - start_value
+    net_contribution = current["total_cost_basis"] - start["total_cost_basis"]
+    change = (current["total_value"] - start_value) - net_contribution
     change_pct = (change / start_value * 100) if start_value > 0 else 0
 
     return {
@@ -280,5 +299,6 @@ def get_period_performance(days):
         "current_value": current["total_value"],
         "change": round(change, 2),
         "change_pct": round(change_pct, 2),
+        "net_contribution": round(net_contribution, 2),
         "currency": HOME_CURRENCY,
     }
