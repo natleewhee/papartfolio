@@ -15,6 +15,31 @@ def clear_earnings_cache():
     earnings._earnings_cache.clear()
 
 
+# ---------- _today (SGT-aware) ----------
+
+def test_today_is_sgt_aware_not_server_utc(monkeypatch):
+    """The bot runs on Render (UTC), but a same-day BMO/AMC check needs
+    'today' to follow the user's own SGT clock — plain date.today() is wrong
+    for roughly a third of the SGT calendar day (00:00-08:00 SGT is still
+    'yesterday' in UTC)."""
+    from datetime import datetime as real_datetime
+    import pytz as real_pytz
+
+    # 2026-01-15 23:00 UTC == 2026-01-16 07:00 SGT (SGT = UTC+8)
+    fixed_utc = real_pytz.utc.localize(real_datetime(2026, 1, 15, 23, 0))
+
+    class _FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_utc.replace(tzinfo=None)
+            return fixed_utc.astimezone(tz)
+
+    monkeypatch.setattr(earnings, "datetime", _FixedDatetime)
+
+    assert earnings._today() == real_datetime(2026, 1, 16).date()
+
+
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload

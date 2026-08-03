@@ -1,6 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from apscheduler.triggers.cron import CronTrigger
+import asyncio
 import pytz
 import difflib
 from fetcher import validate_symbol, get_price, get_currency_for_symbol, fetch_extended_hours, get_prices_bulk
@@ -14,17 +15,17 @@ from portfolio_db import (
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
-    fmt_money,
+    fmt_money, format_shares,
 )
 from support import (
-    compute_support_levels, compute_resistance_levels,
+    compute_resistance_levels,
     resolve_support_levels, resolve_support_levels_bulk,
     format_support_table, format_resistance_compact,
     near_support_flags, format_near_support_line,
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
-from telegram_handler import send_daily_report
+from telegram_handler import send_daily_report, chunk_message
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
 import logging
@@ -104,17 +105,28 @@ async def _delete_quietly(msg):
     except Exception:
         pass  # already deleted, too old, or races with the user — never surface this
 
+async def _reply_chunked(update, text, parse_mode=None):
+    """Send `text` as one or more replies, respecting Telegram's ~4096-char
+    message limit — a large enough portfolio/watchlist/earnings sweep would
+    otherwise build a single message Telegram rejects outright, silently
+    dropping the whole reply."""
+    for chunk in chunk_message(text):
+        await update.message.reply_text(chunk, parse_mode=parse_mode)
+
 # ==================== COMMAND HANDLERS ====================
 
 def _parse_add_args(line: str):
-    """Parse one /add line into (symbol, shares, avg_cost), tolerating a leading /add token."""
+    """Parse one /add line into (symbol, shares, avg_cost), tolerating a leading /add token.
+    Shares is a float, not an int — fractional share counts are real (DRIP,
+    fractional-share brokers, and IBKR reconciliation can hand back one),
+    and a plain whole number like "50" parses to 50.0 just fine."""
     parts = line.split()
     if parts and parts[0].lower().lstrip("/") == "add":
         parts = parts[1:]
     if len(parts) != 3:
         return None
     symbol = parts[0].upper()
-    shares = int(parts[1])
+    shares = float(parts[1])
     avg_cost = float(parts[2])
     return symbol, shares, avg_cost
 
@@ -135,11 +147,11 @@ def _apply_add(symbol, shares, avg_cost):
             (existing["shares"] * existing["avg_cost"]) + (shares * avg_cost)
         ) / new_shares
         if update_holding(symbol, new_shares, round(new_avg_cost, 4)):
-            return f"✅ {symbol}: merged → {new_shares} shares @ {fmt_money(new_avg_cost, currency)}"
+            return f"✅ {symbol}: merged → {format_shares(new_shares)} shares @ {fmt_money(new_avg_cost, currency)}"
         return f"❌ {symbol}: error merging"
 
     if add_holding(symbol, shares, avg_cost, currency=currency):
-        return f"✅ {symbol}: added {shares} shares @ {fmt_money(avg_cost, currency)}"
+        return f"✅ {symbol}: added {format_shares(shares)} shares @ {fmt_money(avg_cost, currency)}"
     return f"❌ {symbol}: error adding"
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,7 +182,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol, shares, avg_cost = parsed
         status = await update.message.reply_text(f"🔍 Validating {symbol}...")
         try:
-            await update.message.reply_text(_apply_add(symbol, shares, avg_cost))
+            result = await asyncio.to_thread(_apply_add, symbol, shares, avg_cost)
+            await update.message.reply_text(result)
         except Exception as e:
             logger.error(f"Error in /add: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
@@ -188,7 +201,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 results.append(f"❌ Invalid line: {line}")
                 continue
             symbol, shares, avg_cost = parsed
-            results.append(_apply_add(symbol, shares, avg_cost))
+            results.append(await asyncio.to_thread(_apply_add, symbol, shares, avg_cost))
         except ValueError:
             results.append(f"❌ Invalid line (shares/cost must be numbers): {line}")
         except Exception as e:
@@ -240,7 +253,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         symbol = parts[1].upper()
-        shares = int(parts[2])
+        shares = float(parts[2])
         avg_cost = float(parts[3])
 
         if shares <= 0:
@@ -259,8 +272,8 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_action"] = ("update", symbol, shares, avg_cost)
         await update.message.reply_text(
             f"⚠️ Overwrite *{symbol}*?\n"
-            f"  {existing['shares']} @ {fmt_money(existing['avg_cost'], currency)} → "
-            f"{shares} @ {fmt_money(avg_cost, currency)}",
+            f"  {format_shares(existing['shares'])} @ {fmt_money(existing['avg_cost'], currency)} → "
+            f"{format_shares(shares)} @ {fmt_money(avg_cost, currency)}",
             parse_mode="Markdown",
             reply_markup=_CONFIRM_KEYBOARD,
         )
@@ -286,7 +299,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         privacy = get_setting("privacy_mode", "0") == "1"
 
         # Calculate metrics (read-only check — don't overwrite today's official snapshot)
-        metrics = calculate_portfolio_metrics(save_snapshot=False)
+        metrics = await asyncio.to_thread(calculate_portfolio_metrics, save_snapshot=False)
 
         if not metrics["holdings"]:
             await update.message.reply_text("⚠️ Could not fetch prices for any holdings right now. Try again shortly.")
@@ -300,7 +313,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji = "🟢" if holding["daily_change_%"] >= 0 else "🔴"
             msg += (
                 f"*{holding['symbol']}* ({holding['pct_of_portfolio']:.1f}% of portfolio)\n"
-                f"  Shares: {holding['shares']} @ {fmt_money(holding['avg_cost'], currency, privacy)}\n"
+                f"  Shares: {format_shares(holding['shares'])} @ {fmt_money(holding['avg_cost'], currency, privacy)}\n"
                 f"  Current: {fmt_money(holding['current_price'], currency, privacy)} {emoji} {holding['daily_change_%']:+.2f}%\n"
                 f"  Value: {fmt_money(holding['current_value'], currency, privacy)}\n"
                 f"  Gain: {fmt_money(holding['unrealized_gain'], currency, privacy, show_sign=True)} ({holding['unrealized_gain_pct']:+.2f}%)\n\n"
@@ -331,7 +344,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for currency, rate in metrics["fx_rates"].items():
             msg += f"\nFX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}"
 
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await _reply_chunked(update, msg, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Error in /list: {e}")
@@ -377,7 +390,7 @@ async def on_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _, symbol, shares, avg_cost = pending
             ok = update_holding(symbol, shares, avg_cost)
             await query.edit_message_text(
-                f"✅ Updated {symbol}: {shares} @ {avg_cost}" if ok else f"❌ Error updating {symbol}"
+                f"✅ Updated {symbol}: {format_shares(shares)} @ {avg_cost}" if ok else f"❌ Error updating {symbol}"
             )
     except Exception as e:
         logger.error(f"Error in confirmation ({action}): {e}")
@@ -416,7 +429,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = parts[1].upper()
-    price_data = get_price(symbol)
+    price_data = await asyncio.to_thread(get_price, symbol)
     if not price_data or not price_data["price"]:
         await update.message.reply_text(f"❌ Could not fetch price for {symbol}")
         return
@@ -427,7 +440,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji = "🟢" if change_pct >= 0 else "🔴"
 
     price_line = f"Price: {fmt_money(price_data['price'], currency)}"
-    extended = fetch_extended_hours(symbol)
+    extended = await asyncio.to_thread(fetch_extended_hours, symbol)
     if extended:
         label = "Pre-mkt" if extended["market_state"] == "PRE" else "Post-mkt"
         ext_pct = extended["change_pct"]
@@ -442,7 +455,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def _cmd_period_performance(update: Update, days: int, label: str):
-    perf = get_period_performance(days)
+    perf = await asyncio.to_thread(get_period_performance, days)
     if not perf:
         await update.message.reply_text(
             f"📭 Not enough history yet for a {label} comparison — check back after a few more daily reports."
@@ -458,6 +471,11 @@ async def _cmd_period_performance(update: Update, days: int, label: str):
         f"Now: {fmt_money(perf['current_value'], currency, privacy)}\n"
         f"Change: {emoji} {fmt_money(perf['change'], currency, privacy, show_sign=True)} ({perf['change_pct']:+.2f}%)"
     )
+    # Deposits/withdrawals since the start date are already backed out of
+    # Change above — surface the amount so it's clear why Change doesn't
+    # match a naive (now - start) if you added/removed holdings meanwhile.
+    if abs(perf["net_contribution"]) > 0.005:
+        msg += f"\n_Excludes {fmt_money(perf['net_contribution'], currency, privacy, show_sign=True)} added/removed since then_"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -482,7 +500,7 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Portfolio is empty")
         return
 
-    lines = [f"/add {h['symbol']} {h['shares']} {h['avg_cost']}" for h in holdings]
+    lines = [f"/add {h['symbol']} {format_shares(h['shares'])} {h['avg_cost']}" for h in holdings]
 
     await update.message.reply_text(
         "📤 Backup below. Copy the next message and paste it back in any time "
@@ -662,7 +680,7 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         direction = parts[2].lower()
         threshold = float(parts[3])
 
-        if not validate_symbol(symbol):
+        if not await asyncio.to_thread(validate_symbol, symbol):
             await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
             return
 
@@ -709,14 +727,24 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if a["direction"] == "near_support":
             line = f"#{a['id']}: {a['symbol']} near support (within {a['threshold']:.1f}%)"
-            data = compute_support_levels(a["symbol"])
+            # Resolve the same way alerts._check_support_alert() actually
+            # evaluates the trigger — a live price, and a manual ST/MT
+            # override (set via /watch SYMBOL ST MT) if this symbol has one —
+            # rather than the auto-computed level off yesterday's close,
+            # which can disagree with what will actually fire.
+            price_data = await asyncio.to_thread(get_price, a["symbol"])
+            current_price = price_data["price"] if price_data and price_data.get("price") else None
+            entry = get_watchlist_entry(a["symbol"])
+            manual_st = entry.get("manual_st_support") if entry else None
+            manual_mt = entry.get("manual_mt_support") if entry else None
+            data = await asyncio.to_thread(resolve_support_levels, a["symbol"], current_price, manual_st, manual_mt)
             if data:
                 dists = [sl["distance_pct"] for sl in (data["short_term"], data["mid_term"]) if sl]
                 if dists:
                     line += f" — currently {min(dists):.1f}% away"
         else:
             line = f"#{a['id']}: {a['symbol']} {a['direction']} {fmt_money(a['threshold'], currency)}"
-            price_data = get_price(a["symbol"])
+            price_data = await asyncio.to_thread(get_price, a["symbol"])
             if price_data and price_data["price"]:
                 price = price_data["price"]
                 gap_pct = abs(price - a["threshold"]) / price * 100 if price else 0
@@ -768,7 +796,7 @@ async def cmd_alertsupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Percent must be > 0")
             return
 
-        if not validate_symbol(symbol):
+        if not await asyncio.to_thread(validate_symbol, symbol):
             await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
             return
 
@@ -880,7 +908,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     status = await update.message.reply_text(f"🔍 Validating {symbol}...")
-    if not validate_symbol(symbol):
+    if not await asyncio.to_thread(validate_symbol, symbol):
         await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
         await _delete_quietly(status)
         return
@@ -934,7 +962,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status = await update.message.reply_text("🔄 Computing support levels...")
-    rows = _support_rows(watched)
+    rows = await asyncio.to_thread(_support_rows, watched)
     msg = (
         "👁️ *Watchlist — Support Levels*\n"
         f"```\n{format_support_table(rows, fmt_money)}\n```\n"
@@ -943,7 +971,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flag_line = format_near_support_line(near_support_flags(rows))
     if flag_line:
         msg += "\n" + flag_line
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await _reply_chunked(update, msg, parse_mode="Markdown")
     await _delete_quietly(status)
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -966,12 +994,12 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = parts[1].upper()
     status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
     currency = get_currency_for_symbol(symbol)
-    price_data = get_price(symbol)
+    price_data = await asyncio.to_thread(get_price, symbol)
     current_price = price_data["price"] if price_data and price_data.get("price") else None
     entry = get_watchlist_entry(symbol)
     manual_st = entry.get("manual_st_support") if entry else None
     manual_mt = entry.get("manual_mt_support") if entry else None
-    data = resolve_support_levels(symbol, current_price, manual_st, manual_mt)
+    data = await asyncio.to_thread(resolve_support_levels, symbol, current_price, manual_st, manual_mt)
     if not data:
         await update.message.reply_text(
             f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
@@ -1011,7 +1039,7 @@ async def cmd_resistance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = parts[1].upper()
     status = await update.message.reply_text(f"🔄 Computing resistance for {symbol}...")
     currency = get_currency_for_symbol(symbol)
-    data = compute_resistance_levels(symbol)
+    data = await asyncio.to_thread(compute_resistance_levels, symbol)
     if not data:
         await update.message.reply_text(
             f"❌ Couldn't compute resistance for {symbol} — not enough price history or invalid ticker."
@@ -1048,7 +1076,7 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = parts[1].upper()
         status = await update.message.reply_text(f"🔄 Checking earnings for {symbol}...")
         currency = get_currency_for_symbol(symbol)
-        data = fetch_earnings(symbol)
+        data = await asyncio.to_thread(fetch_earnings, symbol)
         if not data or (not data["next"] and not data["last"]):
             await update.message.reply_text(f"❌ No earnings data found for {symbol}.")
             await _delete_quietly(status)
@@ -1110,7 +1138,7 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status = await update.message.reply_text("🔄 Checking earnings calendar...")
-    results = fetch_earnings_bulk(symbols)
+    results = await asyncio.to_thread(fetch_earnings_bulk, symbols)
     upcoming, recent = earnings_flags(results)
 
     if not upcoming and not recent:
@@ -1133,7 +1161,7 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
             currency = get_currency_for_symbol(symbol)
             lines.append(format_earnings_line(symbol, currency, fmt_money, last_event=last_event))
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _reply_chunked(update, "\n".join(lines), parse_mode="Markdown")
     await _delete_quietly(status)
 
 async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -14,6 +14,7 @@ close-of-business processing — running this more than once a day just
 re-reads the same snapshot, which is harmless (not wasted beyond one extra
 API call), not something to design around.
 """
+import asyncio
 import time
 import logging
 from datetime import datetime
@@ -22,7 +23,7 @@ import xml.etree.ElementTree as ET
 import requests
 from config import IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID, HOME_CURRENCY, TIMEZONE
 from portfolio_db import get_all_holdings, add_holding, update_holding, remove_holding, get_setting, set_setting
-from portfolio import calculate_portfolio_metrics
+from portfolio import calculate_portfolio_metrics, format_shares
 from fetcher import fetch_fx_rate
 from telegram_handler import send_telegram_message
 
@@ -139,7 +140,11 @@ def _parse_positions(xml_text):
             continue
 
         try:
-            shares = int(float(position))
+            # Kept as a float, not truncated to int — IBKR reports fractional
+            # share counts for DRIP/fractional-share positions, and int()
+            # truncation would silently understate value/gain and re-flag a
+            # spurious "updated" diff on every subsequent reconciliation.
+            shares = float(position)
             avg_cost = float(cost_price)
         except ValueError:
             continue
@@ -290,7 +295,14 @@ def reconcile_holdings():
         if existing is None:
             if add_holding(symbol, pos["shares"], pos["avg_cost"], currency=pos["currency"]):
                 added.append(pos)
-        elif existing["shares"] != pos["shares"] or abs(existing["avg_cost"] - pos["avg_cost"]) > 0.0001:
+        # Tolerance-based, not exact equality, on both fields — shares are
+        # now a float (see above), so an exact != would flap on harmless
+        # float storage/round-trip noise the same way avg_cost already
+        # guards against.
+        elif (
+            abs(existing["shares"] - pos["shares"]) > 0.0001
+            or abs(existing["avg_cost"] - pos["avg_cost"]) > 0.0001
+        ):
             if update_holding(symbol, pos["shares"], pos["avg_cost"]):
                 updated.append({"symbol": symbol, "from": existing, "to": pos})
 
@@ -332,11 +344,11 @@ def _format_summary(result):
     else:
         lines = ["🔄 *IBKR Reconciliation*", ""]
         for p in added:
-            lines.append(f"➕ Added {p['symbol']}: {p['shares']} @ {p['avg_cost']:.2f} {p['currency']}")
+            lines.append(f"➕ Added {p['symbol']}: {format_shares(p['shares'])} @ {p['avg_cost']:.2f} {p['currency']}")
         for u in updated:
             frm, to = u["from"], u["to"]
             lines.append(
-                f"✏️ Updated {u['symbol']}: {frm['shares']}→{to['shares']} shares, "
+                f"✏️ Updated {u['symbol']}: {format_shares(frm['shares'])}→{format_shares(to['shares'])} shares, "
                 f"avg cost {frm['avg_cost']:.2f}→{to['avg_cost']:.2f}"
             )
         for h in removed:
@@ -372,7 +384,7 @@ async def run_reconciliation():
     Silent no-op if the feature isn't configured. Also used directly by
     /reconcile for on-demand testing — same code path, same summary."""
     try:
-        result = reconcile_holdings()
+        result = await asyncio.to_thread(reconcile_holdings)
         if result["status"] == "ok":
             now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%d %b %Y, %H:%M") + " SGT"
             set_setting(LAST_RECONCILED_SETTING_KEY, now)
