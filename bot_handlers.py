@@ -25,6 +25,7 @@ from support import (
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
+from ai_brief import generate_market_brief, is_configured as ai_brief_configured
 from telegram_handler import send_daily_report, chunk_message
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -68,6 +69,7 @@ BOT_COMMANDS = [
     ("watchlist", "Watched stocks' support levels at a glance"),
     ("earnings", "Earnings dates and last result"),
     ("reconcile", "Manually sync holdings from IBKR"),
+    ("brief", "AI market brief: overnight/company news"),
 ]
 
 
@@ -1186,6 +1188,35 @@ async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         await _delete_quietly(status)
 
+async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /brief — on-demand AI market brief (same content as the AI
+    Market Brief section of the daily report), for checking mid-day without
+    waiting for the scheduled report."""
+    if not await check_user(update):
+        return
+
+    if not ai_brief_configured():
+        await update.message.reply_text(
+            "❌ AI brief isn't configured — set ANTHROPIC_API_KEY to enable it."
+        )
+        return
+
+    metrics = await asyncio.to_thread(calculate_portfolio_metrics, save_snapshot=False)
+    watched = [w["symbol"] for w in get_watchlist()]
+    if not metrics["holdings"] and not watched:
+        await update.message.reply_text("📭 Nothing to brief — add holdings or watch a stock first.")
+        return
+
+    status = await update.message.reply_text("🔄 Researching market news (this can take a minute)...")
+    brief = await asyncio.to_thread(generate_market_brief, metrics["holdings"], watched)
+    if not brief:
+        await update.message.reply_text("❌ Couldn't generate a brief right now — try again shortly.")
+        await _delete_quietly(status)
+        return
+
+    await _reply_chunked(update, f"🌐 *AI Market Brief*\n\n{brief}", parse_mode="Markdown")
+    await _delete_quietly(status)
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help"""
     if not await check_user(update):
@@ -1223,6 +1254,11 @@ whichever you actually hold)
 *— IBKR Reconciliation —*
 /reconcile — manually sync holdings from IBKR (normally runs automatically
   ~10 min after each market close; requires IBKR_FLEX_TOKEN + QUERY_ID)
+
+*— AI Market Brief —*
+/brief — on-demand overnight & company news for holdings/watchlist, via
+  Claude + web search (also included in the daily report; requires
+  ANTHROPIC_API_KEY)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level

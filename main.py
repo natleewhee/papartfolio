@@ -16,7 +16,7 @@ from bot_handlers import (
     cmd_price, cmd_week, cmd_month, cmd_export, cmd_settings, cmd_schedule, cmd_privacy, cmd_reportstyle,
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert, cmd_alertsupport,
     cmd_support, cmd_resistance, cmd_watch, cmd_unwatch, cmd_watchlist,
-    cmd_earnings, cmd_reconcile,
+    cmd_earnings, cmd_reconcile, cmd_brief,
     cmd_help, cmd_start, cmd_unknown, on_confirmation,
     BOT_COMMANDS,
 )
@@ -143,6 +143,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("earnings", cmd_earnings))
     app.add_handler(CommandHandler("reconcile", cmd_reconcile))
+    app.add_handler(CommandHandler("brief", cmd_brief))
 
     # Inline Confirm/Cancel buttons for /remove, /update, /clear
     app.add_handler(CallbackQueryHandler(on_confirmation))
