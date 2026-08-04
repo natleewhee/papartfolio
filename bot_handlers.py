@@ -25,7 +25,7 @@ from support import (
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
-from ai_brief import generate_market_brief, is_configured as ai_brief_configured
+from ai_brief import generate_market_brief, is_configured as ai_brief_configured, key_preview as ai_brief_key_preview
 from telegram_handler import send_daily_report, chunk_message
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
 from datetime import datetime
@@ -520,11 +520,18 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report_style = get_setting("report_style", "full")
     report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
 
+    if ai_brief_configured():
+        ai_status = f"configured ({ai_brief_key_preview()})"
+    else:
+        ai_status = "not set"
+
     msg = (
         "⚙️ *Current Settings*\n\n"
         f"Privacy mode: {'ON' if privacy else 'OFF'} (/privacy)\n"
         f"Report style: {report_style} (/reportstyle)\n"
-        f"Report time: {report_time} {TIMEZONE} (/settime)\n\n"
+        f"Report time: {report_time} {TIMEZONE} (/settime)\n"
+        f"IBKR reconciliation: {'configured' if ibkr_configured() else 'not set'}\n"
+        f"AI brief (ANTHROPIC_API_KEY): {ai_status}\n\n"
         "ℹ️ *Notes*\n"
         "• 'Today' change is each stock's own-currency move — it excludes FX "
         "shifts. Use /week or /month for FX-inclusive tracking.\n"

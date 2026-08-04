@@ -22,6 +22,18 @@ def is_configured():
     return bool(ANTHROPIC_API_KEY)
 
 
+def key_preview():
+    """Masked first/last-4 view of the key this running process actually
+    sees (e.g. 'sk-a...f8sd'), for /settings — lets the user cross-check
+    it against what they typed on Render without exposing the full key."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    key = ANTHROPIC_API_KEY
+    if len(key) <= 8:
+        return "*" * len(key)
+    return f"{key[:4]}...{key[-4:]}"
+
+
 def _build_prompt(holdings, watchlist_symbols):
     holding_lines = [
         f"- {h['symbol']}: {h['daily_change_%']:+.1f}% today, "
