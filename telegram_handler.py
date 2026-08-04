@@ -156,7 +156,7 @@ def _build_ai_brief_section(metrics):
     brief = generate_market_brief(metrics["holdings"], watched)
     if not brief:
         return ""
-    return "\n🌐 *AI Market Brief*\n" + brief
+    return "🌐 *AI Market Brief*\n" + brief
 
 def _build_extended_hours_section(metrics, privacy=False):
     """Pre/post-market movement for held US tickers (SGX has no extended-hours
@@ -229,9 +229,15 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         home_currency = metrics["home_currency"]
         emoji = "🟢" if metrics["daily_change_%"] >= 0 else "🔴"
 
+        # AI brief runs first so it can lead the report — a reader's eye
+        # goes to what changed before the raw numbers, not after them.
+        ai_brief_section = await asyncio.to_thread(_build_ai_brief_section, metrics)
+
         # Summary
         today = datetime.now(pytz.timezone(TIMEZONE))
         report = f"📊 *{today.strftime('%d %b %Y')}* ({home_currency})\n\n"
+        if ai_brief_section:
+            report += ai_brief_section + "\n\n"
         report += (
             f"Total: {fmt_money(metrics['total_value'], home_currency, privacy)}\n"
             f"Today: {emoji} {fmt_money(metrics['daily_change_$'], home_currency, privacy, show_sign=True)} "
@@ -274,10 +280,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         support_section = await asyncio.to_thread(_build_support_section, metrics)
         if support_section:
             report += "\n" + support_section
-
-        ai_brief_section = await asyncio.to_thread(_build_ai_brief_section, metrics)
-        if ai_brief_section:
-            report += "\n" + ai_brief_section
 
         await send_telegram_message(report)
         logger.info("✅ Daily report sent")
