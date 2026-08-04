@@ -7,6 +7,7 @@ from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk, fetch_extended_hours_bulk
 from support import resolve_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
 from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
+from ai_brief import generate_market_brief, is_configured as ai_brief_configured
 from datetime import datetime
 import pytz
 import logging
@@ -144,6 +145,19 @@ def _build_support_section(metrics):
         section += "\n" + flag_line
     return section
 
+def _build_ai_brief_section(metrics):
+    """AI-generated overnight/company news synthesis via Claude + web search —
+    the one thing Finnhub/yfinance can't provide (why a stock moved, not just
+    that it did). Silently omitted if ANTHROPIC_API_KEY isn't configured, or
+    if nothing came back (refusal, API error, or genuinely nothing to say)."""
+    if not ai_brief_configured():
+        return ""
+    watched = [w["symbol"] for w in get_watchlist()]
+    brief = generate_market_brief(metrics["holdings"], watched)
+    if not brief:
+        return ""
+    return "\n🌐 *AI Market Brief*\n" + brief
+
 def _build_extended_hours_section(metrics, privacy=False):
     """Pre/post-market movement for held US tickers (SGX has no extended-hours
     sessions). Most relevant right at the report's 20:30 SGT send time, which
@@ -260,6 +274,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         support_section = await asyncio.to_thread(_build_support_section, metrics)
         if support_section:
             report += "\n" + support_section
+
+        ai_brief_section = await asyncio.to_thread(_build_ai_brief_section, metrics)
+        if ai_brief_section:
+            report += "\n" + ai_brief_section
 
         await send_telegram_message(report)
         logger.info("✅ Daily report sent")

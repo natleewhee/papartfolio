@@ -42,6 +42,11 @@ HOME_CURRENCY = "SGD"
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 
+# Anthropic API (optional — AI-generated market brief with web search,
+# synthesizing overnight/company news for the daily report and /brief).
+# Leave unset to disable it entirely, nothing else breaks.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
 # Markets to ping open/close for — only fires if you actually hold something
 # in that currency. Times are in each market's own timezone (weekdays only,
 # no holiday calendar).
