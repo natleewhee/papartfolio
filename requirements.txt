@@ -1,7 +1,10 @@
 requests==2.32.3
-# 20.6+, not 20.3 — anthropic requires httpx>=0.25, and PTB pinned httpx~=0.24.0
-# through 20.5. Same API generation (v20), no behavior change for this bot.
-python-telegram-bot==20.6
+# 21.6+, not 20.x — 20.x never declares/supports Python 3.13 (this repo's
+# pinned runtime, see .python-version) and crashes on Application.builder()
+# .build() there (AttributeError on Updater's __slots__). 21.6 is the first
+# release with declared 3.13 support; it also carries a relaxed httpx pin
+# (~=0.27) that anthropic's httpx>=0.25 requirement needs.
+python-telegram-bot==21.6
 python-dotenv==1.0.1
 apscheduler==3.10.4
 pytz==2024.1
