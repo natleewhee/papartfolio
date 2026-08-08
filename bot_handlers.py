@@ -27,7 +27,7 @@ from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
 from ai_brief import generate_market_brief, is_configured as ai_brief_configured, key_preview as ai_brief_key_preview
 from telegram_handler import send_daily_report, chunk_message
-from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS
+from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME
 from datetime import datetime
 import logging
 
@@ -578,6 +578,10 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tz = market["timezone"]
             when = f"{oh:02d}:{om:02d} SGT" if tz == TIMEZONE else f"{_to_sgt(tz, oh, om)} SGT"
             lines.append(f"  ~{when} (10 min after {market['label']} close)")
+        lines.append(
+            f"  {IBKR_RECONCILE_CATCHUP_TIME} SGT (catch-up — IBKR's own EOD data "
+            "often isn't ready right after close)"
+        )
         last_synced = get_last_reconciled_at()
         lines.append(f"  Last synced: {last_synced if last_synced else 'never yet'}")
         lines.append("")

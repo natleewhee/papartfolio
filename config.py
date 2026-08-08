@@ -42,6 +42,15 @@ HOME_CURRENCY = "SGD"
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 
+# Second, later reconciliation pass (SGT, weekdays). IBKR's own Flex
+# "Activity" data refreshes once/day at their own close-of-business batch —
+# the 10-min-after-close pass (see main.py) often fires before that batch
+# has actually finished, so it can silently re-read the *previous* day's
+# snapshot. This fixed evening time gives IBKR's processing many more hours
+# to complete and lands right before the daily report, so what you read at
+# report time is as fresh as IBKR allows.
+IBKR_RECONCILE_CATCHUP_TIME = "20:00"
+
 # Anthropic API (optional — AI-generated market brief with web search,
 # synthesizing overnight/company news for the daily report and /brief).
 # Leave unset to disable it entirely, nothing else breaks.

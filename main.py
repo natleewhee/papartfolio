@@ -25,7 +25,7 @@ from alerts import check_price_alerts
 from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS
+from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME
 
 import logging
 logging.basicConfig(
@@ -206,10 +206,17 @@ def main():
             replace_existing=True,
         )
 
-    # IBKR Flex holdings reconciliation — runs 10 min after each market
-    # closes (giving prices/positions a moment to settle). Flex's own EOD
-    # data only refreshes once/day regardless, so the earlier of the two
-    # runs may just reconfirm no changes — harmless, not designed around.
+    # IBKR Flex holdings reconciliation — two passes per day.
+    #
+    # 1. ~10 min after each market closes: an early, best-effort attempt.
+    #    IBKR's own Flex "Activity" data only refreshes once/day at their own
+    #    close-of-business batch, which often isn't finished this soon after
+    #    the bell — so this pass may just re-read the *previous* day's
+    #    snapshot. Harmless (one extra API call), not designed around.
+    # 2. A fixed evening catch-up (IBKR_RECONCILE_CATCHUP_TIME, SGT): gives
+    #    IBKR's batch many more hours to actually complete, and lands right
+    #    before the daily report so it reflects the freshest data available.
+    #
     # Silently disabled if IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID aren't set.
     if ibkr_configured():
         for market_key in ("US", "SG"):
@@ -227,7 +234,22 @@ def main():
                 name=f"IBKR Reconcile ({market['label']})",
                 replace_existing=True,
             )
-        logger.info("✅ IBKR Flex reconciliation scheduled (10 min after US + SG close)")
+
+        catchup_hour, catchup_minute = map(int, IBKR_RECONCILE_CATCHUP_TIME.split(":"))
+        scheduler.add_job(
+            run_reconciliation,
+            CronTrigger(
+                hour=catchup_hour, minute=catchup_minute,
+                day_of_week="mon-fri", timezone=pytz.timezone(TIMEZONE),
+            ),
+            id="ibkr_reconcile_catchup",
+            name="IBKR Reconcile (evening catch-up)",
+            replace_existing=True,
+        )
+        logger.info(
+            "✅ IBKR Flex reconciliation scheduled (10 min after US + SG close, "
+            f"plus {IBKR_RECONCILE_CATCHUP_TIME} {TIMEZONE} catch-up)"
+        )
     else:
         logger.info("ℹ️ IBKR Flex reconciliation disabled (IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID not set)")
 
