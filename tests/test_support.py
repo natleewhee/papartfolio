@@ -3,11 +3,12 @@ import pandas as pd
 import pytest
 import support
 from support import (
-    _sma, _pivots, _horizon_level, _fetch_history,
+    _sma, _ema, _pivots, _horizon_level, _fetch_history,
     compute_support_levels, compute_resistance_levels, compute_support_levels_bulk,
     resolve_support_levels, resolve_support_levels_bulk,
     format_support_compact, format_resistance_compact, format_support_table,
     near_support_flags, format_near_support_line,
+    compute_200ema_distance, near_ema200_flags, format_near_ema_line,
 )
 from portfolio import fmt_money
 
@@ -42,6 +43,14 @@ def _synthetic_df(n=250):
 def test_sma():
     assert _sma([1, 2, 3, 4], 2) == 3.5
     assert _sma([1, 2], 5) is None
+
+
+def test_ema():
+    # alpha = 2/4 = 0.5; weighted average of all 5 values, most recent
+    # weighted 1, then 0.5, 0.25, 0.125, 0.0625 going back from 5 to 1:
+    # (5*1 + 4*0.5 + 3*0.25 + 2*0.125 + 1*0.0625) / (1+0.5+0.25+0.125+0.0625)
+    assert _ema([1, 2, 3, 4, 5], 3) == pytest.approx(4.161290322580645)
+    assert _ema([1, 2], 5) is None
 
 
 def test_pivots_finds_local_minima():
@@ -383,3 +392,78 @@ def test_format_near_support_line():
     assert format_near_support_line([]) == ""
     line = format_near_support_line([("AAPL", "ST", 4.5), ("MSFT", "MT", 1.2)])
     assert line == "⚠️ Near support: AAPL (ST -4.5%), MSFT (MT -1.2%)"
+
+
+# ---------- compute_200ema_distance / near_ema200_flags / format_near_ema_line ----------
+
+def test_compute_200ema_distance_none_when_no_history(monkeypatch):
+    monkeypatch.setattr(support, "_fetch_history", lambda symbol, period="1y": None)
+    assert compute_200ema_distance("AAPL") is None
+
+
+def test_compute_200ema_distance_none_when_insufficient_history(monkeypatch):
+    df = pd.DataFrame({"Close": [100.0] * 50})
+    monkeypatch.setattr(support, "_fetch_history", lambda symbol, period="1y": df)
+    assert compute_200ema_distance("AAPL", current_price=100.0) is None
+
+
+def test_compute_200ema_distance_matches_ema_helper(monkeypatch):
+    df = _synthetic_df(250)
+    monkeypatch.setattr(support, "_fetch_history", lambda symbol, period="1y": df)
+    closes = df["Close"].tolist()
+    expected_ema = _ema(closes, 200)
+
+    result = compute_200ema_distance("AAPL", current_price=closes[-1])
+
+    assert result["ema"] == round(expected_ema, 2)
+    expected_distance = abs(closes[-1] - expected_ema) / closes[-1] * 100
+    assert result["distance_pct"] == round(expected_distance, 2)
+
+
+def test_compute_200ema_distance_uses_last_close_when_no_price_given(monkeypatch):
+    df = _synthetic_df(250)
+    monkeypatch.setattr(support, "_fetch_history", lambda symbol, period="1y": df)
+    assert compute_200ema_distance("AAPL") is not None
+
+
+def test_near_ema200_flags_filters_and_sorts_by_distance(monkeypatch):
+    fake_results = {
+        "FAR": {"ema": 100, "distance_pct": 20.0},
+        "NEAR": {"ema": 100, "distance_pct": 1.5},
+        "MID": {"ema": 100, "distance_pct": 3.0},
+    }
+    monkeypatch.setattr(support, "compute_200ema_distance", lambda symbol, current_price=None: fake_results.get(symbol))
+
+    rows = [{"symbol": "FAR", "current_price": 120}, {"symbol": "NEAR", "current_price": 101.5}, {"symbol": "MID", "current_price": 103}]
+    flags = near_ema200_flags(rows, threshold=5.0)
+
+    assert flags == [("NEAR", 1.5), ("MID", 3.0)]
+
+
+def test_near_ema200_flags_empty_when_none_qualify(monkeypatch):
+    monkeypatch.setattr(support, "compute_200ema_distance", lambda symbol, current_price=None: {"ema": 100, "distance_pct": 20.0})
+    rows = [{"symbol": "FAR", "current_price": 120}]
+    assert near_ema200_flags(rows, threshold=5.0) == []
+
+
+def test_near_ema200_flags_empty_input():
+    assert near_ema200_flags([]) == []
+
+
+def test_near_ema200_flags_isolates_failures(monkeypatch):
+    def flaky_distance(symbol, current_price=None):
+        if symbol == "BAD":
+            raise RuntimeError("boom")
+        return {"ema": 100, "distance_pct": 1.0}
+
+    monkeypatch.setattr(support, "compute_200ema_distance", flaky_distance)
+
+    flags = near_ema200_flags([{"symbol": "AAPL", "current_price": 101}, {"symbol": "BAD", "current_price": 101}])
+
+    assert flags == [("AAPL", 1.0)]
+
+
+def test_format_near_ema_line():
+    assert format_near_ema_line([]) == ""
+    line = format_near_ema_line([("AAPL", 4.5), ("MSFT", 1.2)])
+    assert line == "📊 Near 200 EMA: AAPL (4.5%), MSFT (1.2%)"
