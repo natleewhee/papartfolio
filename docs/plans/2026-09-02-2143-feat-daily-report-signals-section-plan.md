@@ -142,24 +142,38 @@ when.
 
 - KTD1. **200 EMA is computed from the same cached 1-year yfinance history
   `support._fetch_history` already fetches for support levels**, via a
-  standard SMA-seeded exponential moving average over the available ~252
-  daily closes. This is not a new limitation: the existing 200-day SMA
-  candidate in `support._compute_levels` relies on the same 1-year window.
-  Governs R7.
-- KTD2. **`Signals`' support/resistance and EMA checks recompute the full
-  holdings-plus-watchlist population independently of
-  `telegram_handler._build_support_section`'s own watchlist-only
-  computation**, rather than sharing one bulk call across both. Duplicate
-  per-symbol yfinance fetches are served from `support.py`'s existing
-  6-hour history cache (`_history_cache`), so the duplication costs a
-  cheap in-process recompute, not a network round trip. Chosen over a
-  shared-population refactor of `_build_support_section`, which would
-  widen this plan's blast radius for no user-visible benefit. Governs R5,
-  R7.
+  normalized weighted average of every available close (pandas'
+  `ewm(adjust=True)` convention: weight decays by `(1 - 2/(period+1))` per
+  step back from the most recent close). The seed-then-recur convention
+  (seed with the SMA of the oldest `period` values, then iterate forward)
+  was tried first and rejected: it needs many periods *past* the seed
+  window to converge, and a 1-year (~252-row) history leaves only ~52
+  post-seed rows for a 200-period EMA — nowhere near enough, so the result
+  stayed biased toward the year-old seed price. The normalized-average
+  form has no such convergence requirement and matches a standard
+  reference implementation (`pandas.Series.ewm(span=200,
+  adjust=True).mean()`) even on a short series. Governs R7.
+- KTD2. **`Signals`' support/resistance check and
+  `telegram_handler._build_support_section`'s own watchlist table share
+  one `resolve_support_levels_bulk` call over the full holdings-plus-
+  watchlist population** (`_resolve_signals_support`, computed once in
+  `send_daily_report` and passed to both), rather than each computing it
+  independently. An independent-computation design was tried first and
+  rejected: it recomputed the same swing-point/MA support levels for every
+  watchlist symbol twice per report, not just refetching already-cached
+  history. Governs R5, R7.
 - KTD3. **`MOVER_THRESHOLD_PCT`, `EMA_PERIOD`, and `NEAR_EMA_THRESHOLD_PCT`
   are plain module constants**, not `config.py` or DB-backed settings —
   matches the existing `support.NEAR_SUPPORT_THRESHOLD_PCT` precedent,
   which is also a hardcoded constant with no user-facing override.
+- KTD4. **`near_ema200_flags` fetches each symbol's EMA distance
+  concurrently via `ThreadPoolExecutor`**, matching the existing
+  `compute_support_levels_bulk`/`resolve_support_levels_bulk` pattern in
+  the same module. A symbol with manual ST/MT support set skips the
+  history fetch in `resolve_support_levels`, so `near_ema200_flags` is
+  often the first caller to touch `_fetch_history` for it — a plain loop
+  would serialize N blocking yfinance round-trips instead of running them
+  concurrently.
 
 ### Assumptions
 
@@ -178,10 +192,10 @@ when.
 - **Files:** `support.py`, `tests/test_support.py`.
 - **Approach:**
   - Add constants `EMA_PERIOD = 200` and `NEAR_EMA_THRESHOLD_PCT = 5.0`.
-  - Add `_ema(values, period)`: an SMA-seeded exponential moving average
-    (seed = mean of the first `period` values, then apply the standard
-    smoothing multiplier `2 / (period + 1)` to the rest), returning `None`
-    when `len(values) < period` — same guard style as the existing `_sma`.
+  - Add `_ema(values, period)`: a normalized weighted average of every
+    value (KTD1's `adjust=True` convention — not seed-then-recur, which
+    doesn't converge on a 1-year series), returning `None` when
+    `len(values) < period`.
   - Add `compute_200ema_distance(symbol, current_price=None)`: fetches
     history via the existing `_fetch_history(symbol)`, falls back to the
     latest close for `current_price` when not given (matching
@@ -189,19 +203,24 @@ when.
     history or a non-positive price, else
     `{"ema": round(..., 2), "distance_pct": round(..., 2)}`.
   - Add `near_ema200_flags(rows, threshold=NEAR_EMA_THRESHOLD_PCT)`: takes
-    `[{"symbol", "current_price"}, ...]`, returns
+    `[{"symbol", "current_price"}, ...]`, fetches each symbol's distance
+    concurrently via `ThreadPoolExecutor` (KTD4), returns
     `[(symbol, distance_pct), ...]` sorted closest-first, only entries
-    within `threshold` — same signature shape as `near_support_flags`.
+    within `threshold` — same signature shape as `near_support_flags`, and
+    isolates a per-symbol failure the same way
+    `compute_support_levels_bulk` does.
   - Add `format_near_ema_line(flags)`: renders `"📊 Near 200 EMA: SYM
     (X.X%), ..."` or `""` when empty — mirrors `format_near_support_line`.
 - **Test Scenarios:**
   - Insufficient history (`< 200` rows) → `compute_200ema_distance`
     returns `None`.
-  - A synthetic alternating-return series with a computable EMA (same
-    fixture style as `tests/test_ai_brief.py`'s `_FakeDF`) → verify the
-    computed EMA and `distance_pct` against a hand-computed expected value.
+  - `_ema` against a hand-computed weighted-average value; `compute_200ema_distance`
+    against a synthetic 250-row series, checked against `_ema`'s own output
+    on the same closes (an internal-consistency check, not an independent
+    reference implementation).
   - A `current_price` inside vs. outside `NEAR_EMA_THRESHOLD_PCT` of a
     known EMA → included vs. excluded from `near_ema200_flags`.
+  - A per-symbol exception isolated (one bad symbol doesn't drop the rest).
   - Empty flags list → `format_near_ema_line` returns `""`.
 - **Verification:** `python -m pytest tests/test_support.py -q`.
 
@@ -220,32 +239,39 @@ when.
     `{"symbol", "current_price", "daily_change_%", "manual_st", "manual_mt"}`
     — holdings source `current_price`/`daily_change_%` directly from
     `metrics["holdings"]`; watchlist-only symbols resolve via
-    `get_prices_bulk`, same pattern `_build_support_section` already uses
-    at telegram_handler.py:111-116; `manual_st`/`manual_mt` come from
+    `get_prices_bulk`, same resolution pattern `_build_support_section`
+    used before this unit; `manual_st`/`manual_mt` come from
     `get_watchlist()` for watchlist symbols, `None` otherwise.
-  - Add `_build_signals_section(metrics)`:
+  - Add `_resolve_signals_support(population)`: one
+    `resolve_support_levels_bulk` call over the full population, keyed by
+    symbol. Shared by both `_build_signals_section` and
+    `_build_support_section` (KTD2) so a watchlist symbol's support levels
+    are computed once per report, not once per section.
+  - Add `_build_signals_section(metrics, population=None, support_results=None)`
+    (both params computed locally when omitted, so the function still
+    works standalone):
     - Movers line: rows with `abs(daily_change_%) >= MOVER_THRESHOLD_PCT`,
       sorted by `abs(daily_change_%)` descending, rendered
       `"🚀 Movers: SYM +X.X%, SYM2 -Y.Y%"`; `""` when none (R3, R4).
-    - Support/resistance line: build `resolve_support_levels_bulk` rows
-      from the population (same call shape as
-      `_build_support_section`'s existing `results = resolve_support_levels_bulk(...)`
-      at telegram_handler.py:118-120, population-only difference), then
-      `format_near_support_line(near_support_flags(rows))` (R5, R6).
-    - EMA line: `format_near_ema_line(near_ema200_flags(rows))` from U1,
-      same population (R7, R8).
+    - Support/resistance line: `format_near_support_line(near_support_flags(rows))`
+      over `support_results` (R5, R6).
+    - EMA line: `format_near_ema_line(near_ema200_flags(population))` from
+      U1 (R7, R8).
     - Return `""` when all three lines are empty (R9); otherwise
       `"📡 *Signals*\n" + "\n".join(non-empty lines)`.
-  - In `_build_support_section`, remove its own
-    `flag_line = format_near_support_line(near_support_flags(rows)); if flag_line: section += ...`
-    block (telegram_handler.py:143-145) — the detailed ST/MT table itself
-    is unchanged, only the flag line moves into `Signals`.
-  - In `send_daily_report`, remove the `🏆/📉` best/worst line
-    (telegram_handler.py:249-252), call
-    `signals_section = await asyncio.to_thread(_build_signals_section, metrics)`
-    alongside the existing `ai_brief_section` call, and prepend
-    `signals_section` (when non-empty) directly after `ai_brief_section`,
-    before the `Total`/`Today`/`Gain` block.
+  - Change `_build_support_section` to accept the same
+    `(metrics, population=None, support_results=None)` parameters and
+    consume `support_results` instead of resolving its own; remove its own
+    `flag_line = format_near_support_line(near_support_flags(rows))` append
+    — the detailed ST/MT table itself is unchanged, only the flag line
+    moves into `Signals`.
+  - In `send_daily_report`, remove the `🏆/📉` best/worst line, compute
+    `watchlist_rows`, `population`, and `support_results` once via
+    `asyncio.to_thread`, and pass all three into `_build_signals_section`
+    and `_build_support_section` (both accept `watchlist_rows` too, so
+    neither re-reads the watchlist table). Prepend
+    `_build_signals_section`'s output (when non-empty) directly after the
+    AI brief section, before the `Total`/`Today`/`Gain` block.
   - Import `near_ema200_flags, format_near_ema_line` from `support` at the
     top of `telegram_handler.py`.
 - **Test Scenarios (Acceptance Examples):**

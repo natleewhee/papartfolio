@@ -109,9 +109,12 @@ ai_brief.py            AI market brief generation via the Anthropic API.
 
 telegram_handler.py    Assembles and sends the daily report (delegates each
                       optional section — extended hours, earnings, support,
-                      AI brief — to its own _build_*_section() helper so
-                      any one of them failing/being disabled doesn't break
-                      the rest of the report).
+                      Signals, AI brief — to its own _build_*_section()
+                      helper so any one of them failing/being disabled
+                      doesn't break the rest of the report). Signals
+                      (biggest movers, support/resistance proximity, 200
+                      EMA proximity across holdings + watchlist) leads the
+                      report alongside the AI brief.
 
 bot_handlers.py        All /command handlers (see §6) — the Telegram-facing
                       layer. Talks to portfolio_db.py, portfolio.py,
@@ -167,6 +170,19 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
   genuine thesis-relevant news — not a fixed % cutoff applied identically
   to every symbol. The brief is capped at ~150 words (`MAX_TOKENS = 2000`)
   and leads the daily report (placed before the numbers, not after).
+- **Signals uses a flat threshold, deliberately different from the AI
+  brief**: `telegram_handler._build_signals_section` flags movers at a flat
+  ±3% (`MOVER_THRESHOLD_PCT`), independent of the AI brief's relative-to-
+  volatility definition — the two are allowed to diverge rather than share
+  a calculation. Support/resistance and 200-EMA (`support.EMA_PERIOD`,
+  `NEAR_EMA_THRESHOLD_PCT`) proximity checks cover holdings as well as the
+  watchlist, computed once per report (`_signals_population`,
+  `_resolve_signals_support`) and shared with the watchlist support table
+  below it, so a watchlist symbol isn't quoted or support-checked twice.
+  The 200 EMA uses a normalized weighted average (pandas' `ewm(adjust=True)`
+  convention) rather than the seed-then-recur convention — the latter needs
+  far more post-seed history than the shared 1-year yfinance window
+  provides to converge.
 - **IBKR Flex is EOD-only, once a day**: IBKR's own Flex "Activity" data
   refreshes once daily at their own close-of-business batch — querying it
   more often just re-reads the same snapshot. Two scheduled passes exist

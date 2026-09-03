@@ -365,6 +365,96 @@ def format_near_support_line(flags):
     return "⚠️ Near support: " + ", ".join(parts)
 
 
+EMA_PERIOD = 200
+NEAR_EMA_THRESHOLD_PCT = 5.0  # matches NEAR_SUPPORT_THRESHOLD_PCT's own default
+
+
+def _ema(values, period):
+    """Exponential moving average of `values` over `period` (pandas'
+    ewm(adjust=True) convention: a normalized weighted average of every
+    value, weight decaying by (1 - 2/(period+1)) per step back from the
+    most recent). Chosen over the seed-then-recur convention specifically
+    because that one needs many periods *past* the seed window to converge
+    — with only ~1yr (~252 rows) of history for a 200-period EMA, barely 50
+    rows are left to converge, biasing the result toward the seed window's
+    (year-old) price level. The weighted-average form has no such
+    convergence requirement, so it stays accurate on a short series.
+    Returns None if there are fewer than `period` values."""
+    if len(values) < period:
+        return None
+    alpha = 2 / (period + 1)
+    weighted_sum = 0.0
+    weight_total = 0.0
+    weight = 1.0
+    for v in reversed(values):
+        weighted_sum += weight * v
+        weight_total += weight
+        weight *= (1 - alpha)
+    return weighted_sum / weight_total
+
+
+def compute_200ema_distance(symbol, current_price=None):
+    """How far `current_price` sits from `symbol`'s 200-day EMA, computed
+    from the same cached 1yr history compute_support_levels() already uses
+    (so this costs no extra network call for a symbol already checked for
+    support/resistance this run). Returns None if history is unavailable —
+    same as compute_support_levels() for a recent IPO with < 200 days of
+    history — or {"ema": ..., "distance_pct": ...} otherwise."""
+    df = _fetch_history(symbol)
+    if df is None or len(df) < EMA_PERIOD:
+        return None
+
+    closes = df["Close"].tolist()
+    if current_price is None:
+        current_price = closes[-1]
+    if not current_price or current_price <= 0:
+        return None
+
+    ema = _ema(closes, EMA_PERIOD)
+    if not ema or ema <= 0:
+        return None
+
+    distance_pct = abs(current_price - ema) / current_price * 100
+    return {"ema": round(ema, 2), "distance_pct": round(distance_pct, 2)}
+
+
+def near_ema200_flags(rows, threshold=NEAR_EMA_THRESHOLD_PCT):
+    """Which rows sit within `threshold`% of their 200-day EMA. rows: iterable
+    of {"symbol", "current_price"}. Returns [(symbol, distance_pct), ...]
+    sorted closest-first — same shape as near_support_flags(), but this is a
+    genuinely separate signal (EMA vs. the swing-point/SMA basis support
+    levels use), so a symbol can appear in both, either, or neither.
+
+    Concurrent per symbol, like every other bulk check in this module
+    (compute_support_levels_bulk, resolve_support_levels_bulk) — a symbol
+    with manual ST/MT support set still needs its own history fetch here,
+    so a plain loop would serialize N blocking yfinance round-trips."""
+    rows = list(rows)
+    if not rows:
+        return []
+
+    def _one(r):
+        try:
+            return r["symbol"], compute_200ema_distance(r["symbol"], r.get("current_price"))
+        except Exception as e:
+            logger.error(f"❌ Error computing 200 EMA for {r['symbol']}: {e}")
+            return r["symbol"], None
+
+    with ThreadPoolExecutor(max_workers=min(len(rows), 8)) as pool:
+        results = dict(pool.map(_one, rows))
+
+    flags = [(symbol, data["distance_pct"]) for symbol, data in results.items() if data and data["distance_pct"] <= threshold]
+    return sorted(flags, key=lambda x: x[1])
+
+
+def format_near_ema_line(flags):
+    """One-line summary of near_ema200_flags()'s output, or "" if none."""
+    if not flags:
+        return ""
+    parts = [f"{symbol} ({dist:.1f}%)" for symbol, dist in flags]
+    return "📊 Near 200 EMA: " + ", ".join(parts)
+
+
 def format_resistance_compact(data, currency, fmt_money):
     """One-line summary, e.g. `AAPL  $195 · ST $205 (+5.1%) · MT $220 (+12.8%)`
     (the % is the rise needed from today's price up to that resistance)."""

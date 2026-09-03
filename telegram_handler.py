@@ -5,7 +5,10 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, TIMEZONE
 from portfolio import calculate_portfolio_metrics, fmt_money, format_holdings_table, get_currency_breakdown
 from portfolio_db import get_setting, get_watchlist
 from fetcher import get_currency_for_symbol, get_prices_bulk, fetch_extended_hours_bulk
-from support import resolve_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line
+from support import (
+    resolve_support_levels_bulk, format_support_table, near_support_flags, format_near_support_line,
+    near_ema200_flags, format_near_ema_line,
+)
 from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
 from ai_brief import generate_market_brief, is_configured as ai_brief_configured
 from datetime import datetime
@@ -15,6 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+MOVER_THRESHOLD_PCT = 3.0  # flat threshold, deliberately independent of ai_brief's relative-volatility definition
 
 def chunk_message(text, limit=TELEGRAM_MESSAGE_LIMIT):
     """Split `text` into Telegram-safe chunks, breaking on line boundaries so
@@ -89,39 +93,78 @@ async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
         logger.info("✅ Message sent to Telegram")
     return ok
 
-def _build_support_section(metrics):
+def _signals_population(metrics, watchlist_rows=None):
+    """One row per symbol in {watchlist} ∪ {holdings}, each with the price
+    data both _build_signals_section and _build_support_section need.
+    Holdings resolve directly from metrics; watchlist-only symbols get a
+    live quote (concurrently). Computed once per report and passed to both
+    callers (along with `watchlist_rows`) so a watchlist-only symbol needs
+    exactly one quote fetch and one watchlist read, not one per section."""
+    if watchlist_rows is None:
+        watchlist_rows = get_watchlist()
+    manual_by_symbol = {w["symbol"]: (w.get("manual_st_support"), w.get("manual_mt_support")) for w in watchlist_rows}
+    watched = [w["symbol"] for w in watchlist_rows]
+
+    held = {h["symbol"]: h for h in metrics["holdings"]}
+    population = list(dict.fromkeys(watched + list(held.keys())))  # union, dedup, stable order
+
+    resolved_price = {s: held[s]["current_price"] for s in population if s in held}
+    resolved_change_pct = {s: held[s]["daily_change_%"] for s in population if s in held}
+    missing = [s for s in population if s not in resolved_price]
+    if missing:
+        quotes = get_prices_bulk(missing)
+        for s, q in quotes.items():
+            resolved_price[s] = q["price"] if q and q.get("price") else None
+            resolved_change_pct[s] = q["change_pct"] if q and q.get("change_pct") is not None else None
+
+    return [
+        {
+            "symbol": s,
+            "current_price": resolved_price.get(s),
+            "daily_change_%": resolved_change_pct.get(s),
+            "manual_st": manual_by_symbol.get(s, (None, None))[0],
+            "manual_mt": manual_by_symbol.get(s, (None, None))[1],
+        }
+        for s in population
+    ]
+
+def _resolve_signals_support(population):
+    """resolve_support_levels_bulk() over the full population, keyed by
+    symbol — shared by _build_signals_section and _build_support_section so
+    a watchlist symbol's support/resistance (swing points + MAs, not just
+    the underlying history fetch) is computed once per report, not twice."""
+    return resolve_support_levels_bulk(
+        (r["symbol"], r["current_price"], r["manual_st"], r["manual_mt"]) for r in population
+    )
+
+def _build_support_section(metrics, population=None, support_results=None, watchlist_rows=None):
     """Compact support table for the daily report, covering only stocks
     explicitly on the watchlist — holding a stock no longer implies tracking
     its support levels; that's now a deliberate /watch action. Support levels
     are public market prices (not portfolio values), so they're shown even in
-    privacy mode. Returns "" if the watchlist is empty."""
-    watchlist_rows = get_watchlist()
+    privacy mode. Returns "" if the watchlist is empty.
+
+    `population` (from _signals_population), `support_results` (from
+    _resolve_signals_support), and `watchlist_rows` (from get_watchlist())
+    are computed locally when not given, so this function still works
+    standalone (tests, other callers)."""
+    if watchlist_rows is None:
+        watchlist_rows = get_watchlist()
     if not watchlist_rows:
         return ""
     watched = [w["symbol"] for w in watchlist_rows]
-    manual_by_symbol = {w["symbol"]: (w.get("manual_st_support"), w.get("manual_mt_support")) for w in watchlist_rows}
 
-    # A watchlist symbol you also happen to hold already has a price + today's
-    # change from metrics — only fetch a live quote (concurrently) for the
-    # rest, so the report reflects today's actual price rather than
-    # yesterday's close.
-    held = {h["symbol"]: h for h in metrics["holdings"]}
-    resolved_price = {s: held[s]["current_price"] for s in watched if s in held}
-    resolved_change_pct = {s: held[s]["daily_change_%"] for s in watched if s in held}
-    missing = [s for s in watched if s not in resolved_price]
-    if missing:
-        quotes = get_prices_bulk(missing)
-        for s, pd in quotes.items():
-            resolved_price[s] = pd["price"] if pd and pd.get("price") else None
-            resolved_change_pct[s] = pd["change_pct"] if pd and pd.get("change_pct") is not None else None
+    if population is None:
+        population = _signals_population(metrics, watchlist_rows)
+    resolved_price = {r["symbol"]: r["current_price"] for r in population}
+    resolved_change_pct = {r["symbol"]: r["daily_change_%"] for r in population}
 
-    results = resolve_support_levels_bulk(
-        (s, resolved_price.get(s), *manual_by_symbol[s]) for s in watched
-    )
+    if support_results is None:
+        support_results = _resolve_signals_support(population)
 
     rows = []
     for symbol in watched:
-        data = results.get(symbol)
+        data = support_results.get(symbol)
         current_price = resolved_price.get(symbol)
         if current_price is None and data:
             current_price = data["current_price"]  # history-derived fallback (yesterday's close)
@@ -135,15 +178,57 @@ def _build_support_section(metrics):
         })
 
     table = format_support_table(rows, fmt_money)
-    section = (
+    return (
         "\n📉 *Watchlist — Support Levels*\n"
         f"```\n{table}\n```\n"
         "_ST=short · MT=mid support (below price)_"
     )
-    flag_line = format_near_support_line(near_support_flags(rows))
-    if flag_line:
-        section += "\n" + flag_line
-    return section
+
+def _build_signals_section(metrics, population=None, support_results=None):
+    """Consolidated 'what needs attention today' section — big movers,
+    support/resistance proximity, and 200 EMA proximity across holdings and
+    watchlist — leading the report so the signal isn't buried under routine
+    numbers. Replaces the old best/worst line and the near-support flag
+    line that used to trail the watchlist support table. Movers use a flat
+    threshold, deliberately independent of the AI brief's own
+    relative-to-volatility definition. Returns "" if nothing qualifies.
+
+    `population` (from _signals_population) and `support_results` (from
+    _resolve_signals_support) are computed locally when not given, so this
+    function still works standalone (tests, other callers)."""
+    if population is None:
+        population = _signals_population(metrics)
+    if not population:
+        return ""
+
+    movers = [
+        r for r in population
+        if r["daily_change_%"] is not None and abs(r["daily_change_%"]) >= MOVER_THRESHOLD_PCT
+    ]
+    movers.sort(key=lambda r: -abs(r["daily_change_%"]))
+    movers_line = (
+        "🚀 Movers: " + ", ".join(f"{r['symbol']} {r['daily_change_%']:+.1f}%" for r in movers)
+        if movers else ""
+    )
+
+    if support_results is None:
+        support_results = _resolve_signals_support(population)
+    support_rows = [
+        {
+            "symbol": r["symbol"],
+            "short_term": (support_results.get(r["symbol"]) or {}).get("short_term"),
+            "mid_term": (support_results.get(r["symbol"]) or {}).get("mid_term"),
+        }
+        for r in population
+    ]
+    support_line = format_near_support_line(near_support_flags(support_rows))
+
+    ema_line = format_near_ema_line(near_ema200_flags(population))
+
+    lines = [line for line in (movers_line, support_line, ema_line) if line]
+    if not lines:
+        return ""
+    return "📡 *Signals*\n" + "\n".join(lines)
 
 def _build_ai_brief_section(metrics):
     """AI-generated overnight/company news synthesis via Claude + web search —
@@ -229,15 +314,26 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         home_currency = metrics["home_currency"]
         emoji = "🟢" if metrics["daily_change_%"] >= 0 else "🔴"
 
-        # AI brief runs first so it can lead the report — a reader's eye
-        # goes to what changed before the raw numbers, not after them.
+        # Computed once and shared between _build_signals_section and
+        # _build_support_section below, so a watchlist symbol gets exactly
+        # one watchlist read, one live quote fetch, and one support/
+        # resistance computation per report, not one per section.
+        watchlist_rows = await asyncio.to_thread(get_watchlist)
+        population = await asyncio.to_thread(_signals_population, metrics, watchlist_rows)
+        support_results = await asyncio.to_thread(_resolve_signals_support, population)
+
+        # AI brief and Signals run first so they lead the report — a reader's
+        # eye goes to what changed before the raw numbers, not after them.
         ai_brief_section = await asyncio.to_thread(_build_ai_brief_section, metrics)
+        signals_section = await asyncio.to_thread(_build_signals_section, metrics, population, support_results)
 
         # Summary
         today = datetime.now(pytz.timezone(TIMEZONE))
         report = f"📊 *{today.strftime('%d %b %Y')}* ({home_currency})\n\n"
         if ai_brief_section:
             report += ai_brief_section + "\n\n"
+        if signals_section:
+            report += signals_section + "\n\n"
         report += (
             f"Total: {fmt_money(metrics['total_value'], home_currency, privacy)}\n"
             f"Today: {emoji} {fmt_money(metrics['daily_change_$'], home_currency, privacy, show_sign=True)} "
@@ -245,11 +341,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
             f"Gain: {fmt_money(metrics['unrealized_gain'], home_currency, privacy, show_sign=True)} "
             f"({metrics['unrealized_gain_pct']:+.2f}%)\n"
         )
-
-        best = metrics["best_performer"]
-        worst = metrics["worst_performer"]
-        if best and worst:
-            report += f"🏆 {best['symbol']} {best['daily_change_%']:+.1f}% · 📉 {worst['symbol']} {worst['daily_change_%']:+.1f}%\n"
 
         for currency, rate in metrics["fx_rates"].items():
             report += f"FX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}\n"
@@ -277,7 +368,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         if earnings_section:
             report += "\n" + earnings_section
 
-        support_section = await asyncio.to_thread(_build_support_section, metrics)
+        support_section = await asyncio.to_thread(_build_support_section, metrics, population, support_results, watchlist_rows)
         if support_section:
             report += "\n" + support_section
 
