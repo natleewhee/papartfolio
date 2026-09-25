@@ -54,8 +54,8 @@ class _FakeResponse:
 # ---------- fetch_earnings (US / Finnhub path) ----------
 
 def test_fetch_earnings_finds_next_and_last(monkeypatch):
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     payload = {
         "earningsCalendar": [
             {
@@ -87,8 +87,8 @@ def test_fetch_earnings_recent_unreported_shows_as_pending(monkeypatch):
     entirely — that's exactly when it's most relevant to see, and a real
     reported bug: it used to disappear from earnings watch in this window
     (no longer 'upcoming', not yet 'recent' since there were no figures)."""
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     payload = {
         "earningsCalendar": [
             {"date": (today - timedelta(days=1)).isoformat(), "hour": "amc",
@@ -106,8 +106,8 @@ def test_fetch_earnings_recent_unreported_shows_as_pending(monkeypatch):
 def test_fetch_earnings_old_unreported_past_event_shows_nothing(monkeypatch):
     """An old past date beyond the recent window with epsActual still null
     isn't meaningfully 'recent' anymore — genuinely nothing to show."""
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     payload = {
         "earningsCalendar": [
             {"date": (today - timedelta(days=10)).isoformat(), "hour": "amc",
@@ -126,8 +126,7 @@ def test_fetch_earnings_today_unconfirmed_stays_upcoming(monkeypatch):
     can't tell a not-yet-happened AMC release from an already-done BMO one.
     It should surface as still-upcoming (days_until=0), not as a past/
     pending report."""
-    from datetime import date
-    today = date.today()
+    today = earnings._today()
     payload = {"earningsCalendar": [
         {"date": today.isoformat(), "hour": "amc", "epsEstimate": 0.42, "epsActual": None},
     ]}
@@ -144,8 +143,7 @@ def test_fetch_earnings_today_confirmed_by_actuals_shows_as_reported(monkeypatch
     """Today's date but actuals are ALREADY populated (e.g. a fast BMO
     turnaround) proves the report already happened — show it as reported
     with real numbers, not as still-upcoming."""
-    from datetime import date
-    today = date.today()
+    today = earnings._today()
     payload = {"earningsCalendar": [
         {"date": today.isoformat(), "hour": "bmo", "epsEstimate": 0.42, "epsActual": 0.50},
     ]}
@@ -175,8 +173,8 @@ class _FakeTicker:
 
 
 def test_fetch_earnings_sg_ticker_uses_yfinance(monkeypatch):
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     idx = pd.to_datetime([today - timedelta(days=90), today + timedelta(days=10)])
     df = pd.DataFrame(
         {"EPS Estimate": [0.45, 0.50], "Reported EPS": [0.48, None]},
@@ -194,8 +192,8 @@ def test_fetch_earnings_sg_ticker_uses_yfinance(monkeypatch):
 # ---------- caching ----------
 
 def test_earnings_cache_avoids_refetch(monkeypatch):
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     payload = {"earningsCalendar": [
         {"date": (today + timedelta(days=5)).isoformat(), "hour": "bmo", "epsEstimate": 1.0, "epsActual": None},
     ]}
@@ -220,8 +218,8 @@ def test_fetch_events_refetches_after_ttl_expires_regardless_of_event_distance(m
     refreshed sooner for events that were *already* near-term, so a
     reschedule announced while the old date was still several days away
     kept trusting a stale snapshot for up to a day."""
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = earnings._today()
     payload = {"earningsCalendar": [
         {"date": (today + timedelta(days=10)).isoformat(), "hour": "amc", "epsEstimate": 1.0, "epsActual": None},
     ]}
@@ -232,9 +230,9 @@ def test_fetch_events_refetches_after_ttl_expires_regardless_of_event_distance(m
         return _FakeResponse(payload)
 
     monkeypatch.setattr("earnings.requests.get", fake_get)
-    # Seeded from the real wall clock, not an arbitrary epoch: date.today() in
-    # this environment derives from time.time(), so faking it to e.g. 1970
-    # would silently corrupt "today" too.
+    # fake_now seeds from the real wall clock, not an arbitrary epoch (e.g.
+    # 1970) — this only fakes time.time() for the cache's TTL check; it's
+    # independent of earnings._today(), which reads the system clock directly.
     fake_now = [earnings.time.time()]
     monkeypatch.setattr(earnings.time, "time", lambda: fake_now[0])
 
