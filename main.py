@@ -25,7 +25,7 @@ from alerts import check_price_alerts
 from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME
+from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
 
 import logging
 logging.basicConfig(
@@ -161,10 +161,12 @@ def main():
     report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
     hour, minute = map(int, report_time.split(":"))
 
-    # Schedule daily report — weekdays only, markets are closed on weekends
+    # Schedule daily report. Which weekdays depends on the configured time —
+    # see config.daily_report_day_of_week for why an early-morning time
+    # needs "tue-sat" instead of "mon-fri" to avoid a stale Monday report.
     scheduler.add_job(
         send_daily_report,
-        CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=pytz.timezone(TIMEZONE)),
+        CronTrigger(hour=hour, minute=minute, day_of_week=daily_report_day_of_week(report_time), timezone=pytz.timezone(TIMEZONE)),
         id="daily_report",
         name="Daily Portfolio Report",
         replace_existing=True,
@@ -254,7 +256,8 @@ def main():
         logger.info("ℹ️ IBKR Flex reconciliation disabled (IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID not set)")
 
     scheduler.start()
-    logger.info(f"✅ Scheduler started. Daily report at {report_time} {TIMEZONE} (weekdays), alert checks every 15 min, market open/close pings enabled")
+    report_days_label = daily_report_day_of_week(report_time).replace("-", "–")
+    logger.info(f"✅ Scheduler started. Daily report at {report_time} {TIMEZONE} ({report_days_label}), alert checks every 15 min, market open/close pings enabled")
 
     # Start bot
     logger.info("🤖 Bot started. Press Ctrl+C to stop.")

@@ -76,6 +76,25 @@ MARKETS = {
     },
 }
 
+def daily_report_day_of_week(report_time):
+    """Which SGT weekdays the daily report should fire on, given its
+    configured HH:MM time.
+
+    Before SG market open (09:00 SGT), neither market has traded yet that
+    calendar day — so a Monday firing would just re-show Friday's already-
+    reported close under a new date (nothing trades over the weekend),
+    which reads as stale. "tue-sat" instead reports each weekday's close
+    the following SGT morning, matching how the market-close and
+    reconciliation jobs already land (Tue-Sat mornings from Mon-Fri
+    closes, see main.py).
+
+    At/after SG open, that day's own SG session is underway or complete,
+    so a Monday firing has genuinely new content — "mon-fri" is correct,
+    which is why the default 20:30 SGT report time is unaffected."""
+    hour, minute = map(int, report_time.split(":"))
+    sg_open_hour, sg_open_minute = MARKETS["SG"]["open"]
+    return "tue-sat" if (hour, minute) < (sg_open_hour, sg_open_minute) else "mon-fri"
+
 # Logging
 import logging
 logging.basicConfig(

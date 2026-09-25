@@ -27,7 +27,7 @@ from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
 from ai_brief import generate_market_brief, is_configured as ai_brief_configured, key_preview as ai_brief_key_preview
 from telegram_handler import send_daily_report, chunk_message
-from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME
+from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
 from datetime import datetime
 import logging
 
@@ -552,9 +552,10 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
+    report_days = daily_report_day_of_week(report_time).replace("-", "–").title()
     held_currencies = {(h.get("currency") or "USD") for h in get_all_holdings()}
 
-    lines = ["📅 *Notification Schedule*", "", f"Daily report: {report_time} {TIMEZONE}", ""]
+    lines = ["📅 *Notification Schedule*", "", f"Daily report: {report_time} {TIMEZONE} ({report_days})", ""]
 
     for market in MARKETS.values():
         tz = market["timezone"]
@@ -586,7 +587,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  Last synced: {last_synced if last_synced else 'never yet'}")
         lines.append("")
 
-    lines.append("_Weekdays only. Market pings fire only for markets you hold._")
+    lines.append("_Market pings & reconciliation: Mon-Fri (real trading weekdays). Daily report days shown above. Market pings fire only for markets you hold._")
     lines.append("_(Price alerts are separate & event-based — see /alerts.)_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -668,7 +669,7 @@ async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if scheduler:
         scheduler.reschedule_job(
             "daily_report",
-            trigger=CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=pytz.timezone(TIMEZONE)),
+            trigger=CronTrigger(hour=hour, minute=minute, day_of_week=daily_report_day_of_week(time_str), timezone=pytz.timezone(TIMEZONE)),
         )
         await update.message.reply_text(f"✅ Daily report time set to {time_str} {TIMEZONE} — effective immediately")
     else:
