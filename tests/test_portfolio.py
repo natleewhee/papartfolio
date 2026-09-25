@@ -47,20 +47,21 @@ def test_format_shares_shows_fractional_precision():
 def test_format_holdings_table_contains_header_and_rows():
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100.0},
         {"symbol": "MSFT", "currency": "USD", "current_price": 190.0, "cost_basis": 1000,
-         "current_value": 950, "unrealized_gain_pct": -5.0, "daily_change_%": -5.0},
+         "current_value": 950, "unrealized_gain_pct": -5.0, "daily_change_%": -5.0, "daily_change_$": -50.0},
     ]
     table = format_holdings_table(holdings)
     lines = table.split("\n")
     assert lines[0].startswith("SYMBOL")
     assert "GAIN%" in lines[0]
-    assert "TODAY" not in lines[0]  # dropped: overflowed narrower phones, %CHG already covers it
+    assert "$CHG" in lines[0]
+    assert "PRICE" not in lines[0] and "COST" not in lines[0]  # dropped: per-share/entry detail, not daily-relevant
     assert "AAPL" in table and "MSFT" in table
     assert "+10.0%" in table
     assert "-5.0%" in table
-    assert "$110.00" in table  # per-share price
-    assert "$1,000" in table  # original cost basis
+    assert "+$100" in table  # today's $ move
+    assert "-$50" in table
 
 
 def test_format_holdings_table_privacy_masks_dollar_amounts_only():
@@ -71,12 +72,14 @@ def test_format_holdings_table_privacy_masks_dollar_amounts_only():
     contradicted that."""
     holdings = [
         {"symbol": "AAPL", "currency": "USD", "current_price": 110.0, "cost_basis": 1000,
-         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0},
+         "current_value": 1100, "unrealized_gain_pct": 10.0, "daily_change_%": 10.0, "daily_change_$": 100.0},
     ]
     table = format_holdings_table(holdings, privacy=True)
     assert "1,100" not in table
-    assert "110.00" not in table
-    assert "•••" in table
+    assert "$100" not in table  # $CHG masked too, not left as a bare unmasked figure
+    row = table.split("\n")[-1]
+    assert row.count("•••") == 2  # VALUE and $CHG both masked
+    assert "+10.0%" in row  # GAIN%/%CHG stay visible
     assert "+10.0%" in table
 
 

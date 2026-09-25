@@ -106,15 +106,19 @@ ai_brief.py            AI market brief generation via the Anthropic API.
                       relative to their own 20-day volatility, or genuine
                       thesis-relevant news. See §5 for the exact prompt
                       design. Silently disabled without ANTHROPIC_API_KEY.
+                      On-demand only via /brief — not included in the
+                      daily report.
 
-telegram_handler.py    Assembles and sends the daily report (delegates each
-                      optional section — extended hours, earnings, support,
-                      Signals, AI brief — to its own _build_*_section()
-                      helper so any one of them failing/being disabled
-                      doesn't break the rest of the report). Signals
-                      (biggest movers, support/resistance proximity, 200
-                      EMA proximity across holdings + watchlist) leads the
-                      report alongside the AI brief.
+telegram_handler.py    Assembles and sends the daily report. Signals is
+                      the only content section: biggest movers, support/
+                      resistance proximity, 200 EMA proximity, and
+                      earnings events, all across holdings + watchlist,
+                      leading the report ahead of the numbers/table.
+                      Watchlist Support Levels, Extended Hours, the AI
+                      Brief, and the old standalone Earnings Watch
+                      section were cut/folded in — that data is still
+                      reachable via /watchlist, /support, /price, and
+                      /brief.
 
 bot_handlers.py        All /command handlers (see §6) — the Telegram-facing
                       layer. Talks to portfolio_db.py, portfolio.py,
@@ -168,21 +172,30 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
   `support._fetch_history`) and only asks the model to mention a holding
   if today's move is ~1.5x+ that stock's own normal daily swing, or there's
   genuine thesis-relevant news — not a fixed % cutoff applied identically
-  to every symbol. The brief is capped at ~150 words (`MAX_TOKENS = 2000`)
-  and leads the daily report (placed before the numbers, not after).
-- **Signals uses a flat threshold, deliberately different from the AI
-  brief**: `telegram_handler._build_signals_section` flags movers at a flat
-  ±3% (`MOVER_THRESHOLD_PCT`), independent of the AI brief's relative-to-
-  volatility definition — the two are allowed to diverge rather than share
-  a calculation. Support/resistance and 200-EMA (`support.EMA_PERIOD`,
-  `NEAR_EMA_THRESHOLD_PCT`) proximity checks cover holdings as well as the
-  watchlist, computed once per report (`_signals_population`,
-  `_resolve_signals_support`) and shared with the watchlist support table
-  below it, so a watchlist symbol isn't quoted or support-checked twice.
-  The 200 EMA uses a normalized weighted average (pandas' `ewm(adjust=True)`
-  convention) rather than the seed-then-recur convention — the latter needs
-  far more post-seed history than the shared 1-year yfinance window
-  provides to converge.
+  to every symbol. The brief is capped at ~150 words (`MAX_TOKENS = 2000`).
+  On-demand only via `/brief` — cut from the daily report to reduce report
+  length; the filtering logic itself is unchanged.
+- **Signals is the daily report's only content section**, and now also
+  absorbs earnings: `telegram_handler._build_signals_section` flags movers
+  at a flat ±3% (`MOVER_THRESHOLD_PCT`), independent of the AI brief's
+  relative-to-volatility definition — the two are allowed to diverge
+  rather than share a calculation. Support/resistance and 200-EMA
+  (`support.EMA_PERIOD`, `NEAR_EMA_THRESHOLD_PCT`) proximity checks cover
+  holdings as well as the watchlist, computed once per report
+  (`_signals_population`, `_resolve_signals_support`). Earnings events
+  (upcoming within 14 days, reported within 3) render as their own
+  `📅`-prefixed lines, reusing the same fetch/flag helpers the old
+  standalone Earnings Watch section used, just inside Signals instead of
+  trailing after the holdings table. The 200 EMA uses a normalized
+  weighted average (pandas' `ewm(adjust=True)` convention) rather than the
+  seed-then-recur convention — the latter needs far more post-seed history
+  than the shared 1-year yfinance window provides to converge.
+- **The holdings table shows VALUE/GAIN%/$CHG/%CHG, not PRICE/COST**:
+  `portfolio.format_holdings_table` dropped per-share price and cost
+  basis (still available via `/price`, `/export`) in favor of pairing
+  today's dollar move (`$CHG`, from `daily_change_$`) next to its percent
+  — the same "$ then %" convention used in the report's `Today` line.
+  This same table now backs both the daily report and `/list`.
 - **IBKR Flex is EOD-only, once a day**: IBKR's own Flex "Activity" data
   refreshes once daily at their own close-of-business batch — querying it
   more often just re-reads the same snapshot. Two scheduled passes exist
@@ -219,11 +232,11 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
 | `/price SYMBOL` | Quick quote lookup |
 | `/week`, `/month` | Period performance |
 | `/export` | Backup holdings as pasteable `/add` commands |
-| `/settings` | View privacy/report-style/report-time + IBKR/AI-brief configured status (with masked key preview) |
-| `/schedule` | Full notification + reconciliation schedule |
+| `/settings` | View privacy/report-style + IBKR/AI-brief configured status (with masked key preview); points to `/schedule` for report timing |
+| `/schedule` | Full notification + reconciliation schedule, including the daily report's time and day range |
 | `/privacy`, `/reportstyle`, `/settime` | Report preferences |
 | `/alert`, `/alerts`, `/unalert`, `/alertsupport` | Price threshold alerts |
-| `/support`, `/resistance SYMBOL` | On-demand support/resistance levels |
+| `/support SYMBOL` | On-demand support **and** resistance levels for one stock |
 | `/watch`, `/unwatch`, `/watchlist` | Watchlist management (auto or manual ST/MT levels) |
 | `/earnings` | Earnings dates/results for holdings + watchlist |
 | `/reconcile` | Manually trigger IBKR reconciliation |
@@ -250,7 +263,7 @@ Optional (feature self-disables if unset):
 | Var | Enables |
 |---|---|
 | `IBKR_FLEX_TOKEN`, `IBKR_FLEX_QUERY_ID` | IBKR reconciliation (`/reconcile`, scheduled passes). Both required together. Set up via IBKR Account Management → Reports → Flex Queries (new Activity/Open Positions query with Symbol, Position, Cost Basis Price, Currency, Asset Category columns) → Reports → Settings → Flex Web Service for the token. |
-| `ANTHROPIC_API_KEY` | AI market brief (`/brief`, daily report section) |
+| `ANTHROPIC_API_KEY` | AI market brief (`/brief`, on-demand only) |
 
 See `.env.example` for the template. **Render-specific gotcha**: an env
 var change on Render only takes effect after the next completed deploy —
@@ -338,6 +351,6 @@ of relying on wall-clock time) if it keeps tripping people up.
   `is_configured()` guard in the new module, silent no-op everywhere it's
   consumed.
 - **Change daily report content/order**: `telegram_handler.py`'s
-  `send_daily_report()` — each section is built by its own
-  `_build_*_section()` helper and appended conditionally.
+  `send_daily_report()` — Signals (`_build_signals_section()`) is the
+  only content section and leads the report; the numbers/table follow.
 - **Change scheduled job timing**: `main.py`, `scheduler.add_job(...)` calls.
