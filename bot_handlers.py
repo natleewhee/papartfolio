@@ -15,12 +15,12 @@ from portfolio_db import (
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
-    fmt_money, format_shares,
+    fmt_money, format_shares, format_holdings_table,
 )
 from support import (
     compute_resistance_levels,
     resolve_support_levels, resolve_support_levels_bulk,
-    format_support_table, format_resistance_compact,
+    format_support_table,
     near_support_flags, format_near_support_line,
 )
 from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format_earnings_line, UPCOMING_WINDOW_DAYS
@@ -62,8 +62,7 @@ BOT_COMMANDS = [
     ("alerts", "List active alerts"),
     ("unalert", "Cancel an alert"),
     ("alertsupport", "Alert when price nears support"),
-    ("support", "Support levels for one stock"),
-    ("resistance", "Resistance levels for one stock"),
+    ("support", "Support & resistance levels for one stock"),
     ("watch", "Track a stock's support levels (auto or your own ST/MT)"),
     ("unwatch", "Stop tracking a watchlist stock"),
     ("watchlist", "Watched stocks' support levels at a glance"),
@@ -309,17 +308,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Format message
         msg = "📊 *Current Portfolio*\n\n"
-
-        for holding in metrics["holdings"]:
-            currency = holding["currency"]
-            emoji = "🟢" if holding["daily_change_%"] >= 0 else "🔴"
-            msg += (
-                f"*{holding['symbol']}* ({holding['pct_of_portfolio']:.1f}% of portfolio)\n"
-                f"  Shares: {format_shares(holding['shares'])} @ {fmt_money(holding['avg_cost'], currency, privacy)}\n"
-                f"  Current: {fmt_money(holding['current_price'], currency, privacy)} {emoji} {holding['daily_change_%']:+.2f}%\n"
-                f"  Value: {fmt_money(holding['current_value'], currency, privacy)}\n"
-                f"  Gain: {fmt_money(holding['unrealized_gain'], currency, privacy, show_sign=True)} ({holding['unrealized_gain_pct']:+.2f}%)\n\n"
-            )
+        msg += f"```\n{format_holdings_table(metrics['holdings'], privacy)}\n```\n\n"
 
         if metrics["failed_symbols"]:
             msg += f"⚠️ Price unavailable: {', '.join(metrics['failed_symbols'])}\n\n"
@@ -518,7 +507,6 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     privacy = get_setting("privacy_mode", "0") == "1"
     report_style = get_setting("report_style", "full")
-    report_time = get_setting("daily_report_time", DAILY_REPORT_TIME)
 
     if ai_brief_configured():
         ai_status = f"configured ({ai_brief_key_preview()})"
@@ -529,7 +517,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *Current Settings*\n\n"
         f"Privacy mode: {'ON' if privacy else 'OFF'} (/privacy)\n"
         f"Report style: {report_style} (/reportstyle)\n"
-        f"Report time: {report_time} {TIMEZONE} (/settime)\n"
+        "Daily report: see /schedule for time & days (/settime to change)\n"
         f"IBKR reconciliation: {'configured' if ibkr_configured() else 'not set'}\n"
         f"AI brief (ANTHROPIC_API_KEY): {ai_status}\n\n"
         "ℹ️ *Notes*\n"
@@ -989,7 +977,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _delete_quietly(status)
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /support SYMBOL — detailed short & mid-term support for one stock
+    """Handle /support SYMBOL — support and resistance levels for one stock
     (works for any ticker, not just watchlist ones). For all your watchlist
     stocks at once, see /watchlist instead."""
     if not await check_user(update):
@@ -1006,73 +994,50 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = parts[1].upper()
-    status = await update.message.reply_text(f"🔄 Computing support for {symbol}...")
+    status = await update.message.reply_text(f"🔄 Computing support & resistance for {symbol}...")
     currency = get_currency_for_symbol(symbol)
     price_data = await asyncio.to_thread(get_price, symbol)
     current_price = price_data["price"] if price_data and price_data.get("price") else None
     entry = get_watchlist_entry(symbol)
     manual_st = entry.get("manual_st_support") if entry else None
     manual_mt = entry.get("manual_mt_support") if entry else None
-    data = await asyncio.to_thread(resolve_support_levels, symbol, current_price, manual_st, manual_mt)
-    if not data:
+    support_data = await asyncio.to_thread(resolve_support_levels, symbol, current_price, manual_st, manual_mt)
+    # Resistance has no manual-override path — it's never been settable via
+    # /watch the way support is, and this merge doesn't add one.
+    resistance_data = await asyncio.to_thread(compute_resistance_levels, symbol, current_price)
+    if not support_data and not resistance_data:
         await update.message.reply_text(
-            f"❌ Couldn't compute support for {symbol} — not enough price history or invalid ticker."
+            f"❌ Couldn't compute support/resistance for {symbol} — not enough price history or invalid ticker."
         )
         await _delete_quietly(status)
         return
 
-    def leg(sl):
+    display_price = (support_data or resistance_data)["current_price"]
+
+    def support_leg(sl):
         if not sl:
             return "n/a (price near its own low)"
         return f"{fmt_money(sl['level'], currency)} (-{sl['distance_pct']:.1f}%) — {sl['basis']}"
 
-    msg = (
-        f"📉 *{data['symbol']} — Support Levels*\n\n"
-        f"Price: {fmt_money(data['current_price'], currency)}\n"
-        f"Short-term: {leg(data['short_term'])}\n"
-        f"Mid-term: {leg(data['mid_term'])}\n\n"
-        "_(%) = the drop from today's price down to that support._"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-    await _delete_quietly(status)
-
-async def cmd_resistance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /resistance SYMBOL — nearest short & mid-term resistance and the rise needed to reach it"""
-    if not await check_user(update):
-        return
-
-    parts = update.message.text.split()
-    if len(parts) != 2:
-        await update.message.reply_text(
-            "❌ Invalid format\n\n"
-            "Usage: /resistance SYMBOL\n"
-            "Example: /resistance AAPL"
-        )
-        return
-
-    symbol = parts[1].upper()
-    status = await update.message.reply_text(f"🔄 Computing resistance for {symbol}...")
-    currency = get_currency_for_symbol(symbol)
-    data = await asyncio.to_thread(compute_resistance_levels, symbol)
-    if not data:
-        await update.message.reply_text(
-            f"❌ Couldn't compute resistance for {symbol} — not enough price history or invalid ticker."
-        )
-        await _delete_quietly(status)
-        return
-
-    def leg(sl):
+    def resistance_leg(sl):
         if not sl:
             return "n/a (price near its own high)"
         return f"{fmt_money(sl['level'], currency)} (+{sl['distance_pct']:.1f}%) — {sl['basis']}"
 
-    msg = (
-        f"📈 *{data['symbol']} — Resistance Levels*\n\n"
-        f"Price: {fmt_money(data['current_price'], currency)}\n"
-        f"Short-term: {leg(data['short_term'])}\n"
-        f"Mid-term: {leg(data['mid_term'])}\n\n"
-        "_(%) = the rise needed from today's price up to that resistance._"
-    )
+    msg = f"📉📈 *{symbol} — Support & Resistance*\n\nPrice: {fmt_money(display_price, currency)}\n\n"
+    if support_data:
+        msg += (
+            "*Support*\n"
+            f"Short-term: {support_leg(support_data['short_term'])}\n"
+            f"Mid-term: {support_leg(support_data['mid_term'])}\n\n"
+        )
+    if resistance_data:
+        msg += (
+            "*Resistance*\n"
+            f"Short-term: {resistance_leg(resistance_data['short_term'])}\n"
+            f"Mid-term: {resistance_leg(resistance_data['mid_term'])}\n\n"
+        )
+    msg += "_(%) = distance from today's price to that level._"
     await update.message.reply_text(msg, parse_mode="Markdown")
     await _delete_quietly(status)
 
@@ -1253,8 +1218,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 whichever you actually hold)
 
 *— Support & Resistance —*
-/support SYMBOL — short & mid-term support for one stock (any ticker)
-/resistance SYMBOL — short & mid-term resistance + rise needed to reach it
+/support SYMBOL — short & mid-term support and resistance for one stock
+  (any ticker)
 /watch SYMBOL — track a stock's support levels without holding it
 /unwatch SYMBOL — stop tracking a watchlist stock
 /watchlist — all your watched stocks' support levels at a glance
@@ -1269,8 +1234,7 @@ whichever you actually hold)
 
 *— AI Market Brief —*
 /brief — on-demand overnight & company news for holdings/watchlist, via
-  Claude + web search (also included in the daily report; requires
-  ANTHROPIC_API_KEY)
+  Claude + web search (requires ANTHROPIC_API_KEY)
 
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level

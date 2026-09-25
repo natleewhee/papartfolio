@@ -320,6 +320,42 @@ section stay fully functional.
     enumerated.
 - **Verification:** Manual read-through — no test coverage for prose.
 
+### U7. Remove Support Levels, Extended Hours, and AI Brief from the report
+
+- **Goal:** The three originally-agreed sections are gone from
+  `send_daily_report`'s output; nothing else changes.
+- **Requirements:** R1, R2, R3, R4, R5.
+- **Files:** `telegram_handler.py`, `tests/test_telegram_handler.py`.
+- **Approach:**
+  - In `send_daily_report`, delete the three call sites that append
+    `_build_support_section`, `_build_extended_hours_section`, and
+    `_build_ai_brief_section` output to `report`.
+  - Delete `_build_support_section`, `_build_extended_hours_section`,
+    and `_build_ai_brief_section` themselves, along with any imports
+    that become unused as a result (e.g. `resolve_support_levels_bulk`,
+    `format_support_table`, `near_support_flags`, `format_near_support_line`
+    from `support` stay — still used by `_build_signals_section`/
+    `_resolve_signals_support`; `generate_market_brief`,
+    `is_configured as ai_brief_configured` from `ai_brief` do not and
+    should be removed; `fetch_extended_hours_bulk` from `fetcher` does
+    not and should be removed).
+  - `_signals_population`/`_resolve_signals_support` and the `population`/
+    `support_results`/`watchlist_rows` values computed once in
+    `send_daily_report` are unaffected — they're consumed by Signals
+    (U1) and nothing else after this unit.
+  - `/watchlist`, `/support`, `/price`, and `/brief` (R4) are untouched —
+    they call `resolve_support_levels`/`resolve_support_levels_bulk`,
+    `fetch_extended_hours`, and `ai_brief.generate_market_brief`
+    directly, not through the deleted `_build_*_section` functions.
+- **Test Scenarios:**
+  - `send_daily_report`'s output for a holdings set with no watchlist
+    entries no longer contains "Watchlist — Support Levels",
+    "Pre/Post-Market", or "AI Market Brief" text.
+  - `/brief`, `/support`, `/watchlist`, and `/price` still work
+    (existing tests for `ai_brief.py`/`support.py` are untouched by this
+    unit and continue to pass).
+- **Verification:** `python -m pytest tests/test_telegram_handler.py -q`.
+
 ## Verification Contract
 
 | Command | Applies to |

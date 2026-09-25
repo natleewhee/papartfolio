@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 import telegram_handler
 from telegram_handler import chunk_message, send_telegram_message, _signals_population, _build_signals_section
 
@@ -110,10 +111,12 @@ def _no_watchlist(monkeypatch):
 
 
 def _empty_checks(monkeypatch):
-    """Neutral stand-ins for the support/EMA checks so a test can isolate
-    just the piece it's exercising."""
+    """Neutral stand-ins for the support/EMA/earnings checks so a test can
+    isolate just the piece it's exercising."""
     monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", lambda items: {})
     monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {})
+    monkeypatch.setattr(telegram_handler, "earnings_flags", lambda results: ([], []))
 
 
 def test_signals_population_union_of_watchlist_and_holdings(monkeypatch):
@@ -167,6 +170,8 @@ def test_build_signals_section_includes_holding_not_on_watchlist(monkeypatch):
     """AE2: support/resistance now covers holdings, not just the watchlist."""
     _no_watchlist(monkeypatch)
     monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {})
+    monkeypatch.setattr(telegram_handler, "earnings_flags", lambda results: ([], []))
     monkeypatch.setattr(
         telegram_handler, "resolve_support_levels_bulk",
         lambda items: {"AAPL": {"short_term": {"level": 195, "distance_pct": 2.5}, "mid_term": None}},
@@ -184,11 +189,56 @@ def test_build_signals_section_ema_only(monkeypatch):
     _no_watchlist(monkeypatch)
     monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", lambda items: {})
     monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [("TSLA", 1.2)])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {})
+    monkeypatch.setattr(telegram_handler, "earnings_flags", lambda results: ([], []))
     metrics = {"holdings": [{"symbol": "TSLA", "current_price": 250, "daily_change_%": 0.2}]}
 
     result = _build_signals_section(metrics)
 
     assert result == "📡 *Signals*\n📊 Near 200 EMA: TSLA (1.2%)"
+
+
+def test_build_signals_section_earnings_only(monkeypatch):
+    """New: an upcoming earnings event with nothing else qualifying shows
+    only the earnings line, prefixed with 📅 and folded into Signals (no
+    separate Earnings Watch section exists anymore)."""
+    _no_watchlist(monkeypatch)
+    monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", lambda items: {})
+    monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {"NVDA": "fake-result"})
+    next_event = {"date": date(2026, 1, 30), "days_until": 3, "timing": "after market close", "eps_estimate": 1.0}
+    monkeypatch.setattr(telegram_handler, "earnings_flags", lambda results: ([("NVDA", next_event)], []))
+    metrics = {"holdings": [{"symbol": "NVDA", "current_price": 100, "daily_change_%": 0.1}]}
+
+    result = _build_signals_section(metrics)
+
+    assert result.startswith("📡 *Signals*\n📅 ")
+    assert "NVDA" in result
+
+
+def test_build_signals_section_earnings_upcoming_before_recent(monkeypatch):
+    """Upcoming events list before recent ones, matching earnings_flags'
+    own return order."""
+    _no_watchlist(monkeypatch)
+    monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", lambda items: {})
+    monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {})
+    next_event = {"date": date(2026, 1, 30), "days_until": 3, "timing": "after market close", "eps_estimate": 1.0}
+    last_event = {"date": None, "days_since": 1, "eps_actual": 1.4, "eps_estimate": 1.35, "surprise_pct": 3.7}
+    monkeypatch.setattr(
+        telegram_handler, "earnings_flags",
+        lambda results: ([("NVDA", next_event)], [("DRAM", last_event)]),
+    )
+    metrics = {"holdings": [
+        {"symbol": "NVDA", "current_price": 100, "daily_change_%": 0.1},
+        {"symbol": "DRAM", "current_price": 50, "daily_change_%": 0.1},
+    ]}
+
+    result = _build_signals_section(metrics)
+    lines = result.split("\n")
+
+    assert lines[1].startswith("📅") and "NVDA" in lines[1]
+    assert lines[2].startswith("📅") and "DRAM" in lines[2]
 
 
 def test_build_signals_section_empty_when_nothing_qualifies(monkeypatch):
@@ -205,11 +255,15 @@ def test_build_signals_section_no_holdings_or_watchlist(monkeypatch):
     assert _build_signals_section({"holdings": []}) == ""
 
 
-def test_build_signals_section_never_calls_fmt_money(monkeypatch):
-    """AE5: Signals carries only percentages/distances, never dollar
-    formatting, so privacy mode needs no special handling here."""
+def test_build_signals_section_movers_support_ema_never_call_fmt_money(monkeypatch):
+    """AE5: the movers/support/EMA lines carry only percentages/distances,
+    never dollar formatting, so privacy mode needs no special handling for
+    them. (Earnings lines are a separate exception: EPS figures are public
+    company data, not portfolio values — same exemption /watch's support
+    levels already had — and do use fmt_money via format_earnings_line;
+    this test isolates the three price-action lines from that.)"""
     def _boom(*args, **kwargs):
-        raise AssertionError("fmt_money should not be called from Signals")
+        raise AssertionError("fmt_money should not be called from the movers/support/EMA lines")
     monkeypatch.setattr(telegram_handler, "fmt_money", _boom)
     _no_watchlist(monkeypatch)
     _empty_checks(monkeypatch)
@@ -229,6 +283,8 @@ def test_build_signals_section_uses_given_support_results(monkeypatch):
     not trigger a second resolve_support_levels_bulk call here."""
     _no_watchlist(monkeypatch)
     monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [])
+    monkeypatch.setattr(telegram_handler, "fetch_earnings_bulk", lambda symbols: {})
+    monkeypatch.setattr(telegram_handler, "earnings_flags", lambda results: ([], []))
     monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", _boom_resolve)
     metrics = {"holdings": [{"symbol": "AAPL", "current_price": 200, "daily_change_%": 0.1}]}
     population = _signals_population(metrics)
@@ -237,38 +293,3 @@ def test_build_signals_section_uses_given_support_results(monkeypatch):
     result = _build_signals_section(metrics, population, support_results)
 
     assert "AAPL" in result
-
-
-def test_build_support_section_uses_given_support_results(monkeypatch):
-    """Same sharing contract on the watchlist-table side."""
-    monkeypatch.setattr(
-        telegram_handler, "get_watchlist",
-        lambda: [{"symbol": "MSFT", "manual_st_support": None, "manual_mt_support": None}],
-    )
-    monkeypatch.setattr(telegram_handler, "resolve_support_levels_bulk", _boom_resolve)
-    metrics = {"holdings": []}
-    population = [{"symbol": "MSFT", "current_price": 300, "daily_change_%": 1.0, "manual_st": None, "manual_mt": None}]
-    support_results = {"MSFT": {"current_price": 300, "short_term": None, "mid_term": None}}
-
-    result = telegram_handler._build_support_section(metrics, population, support_results)
-
-    assert "MSFT" in result
-
-
-def test_build_support_section_uses_given_watchlist_rows(monkeypatch):
-    """A shared watchlist_rows (fetched once in send_daily_report) must not
-    trigger a second get_watchlist() call here."""
-    def _boom_watchlist():
-        raise AssertionError("get_watchlist should not be called when watchlist_rows is given")
-    monkeypatch.setattr(telegram_handler, "get_watchlist", _boom_watchlist)
-    monkeypatch.setattr(
-        telegram_handler, "resolve_support_levels_bulk",
-        lambda items: {"MSFT": {"short_term": None, "mid_term": None}},
-    )
-    metrics = {"holdings": []}
-    watchlist_rows = [{"symbol": "MSFT", "manual_st_support": None, "manual_mt_support": None}]
-    population = [{"symbol": "MSFT", "current_price": 300, "daily_change_%": 1.0, "manual_st": None, "manual_mt": None}]
-
-    result = telegram_handler._build_support_section(metrics, population, watchlist_rows=watchlist_rows)
-
-    assert "MSFT" in result

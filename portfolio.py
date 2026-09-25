@@ -40,26 +40,26 @@ def format_holdings_table(holdings, privacy=False):
     """Render holdings as an aligned monospace table — wrap the result in a
     Markdown code block (```) so Telegram renders it with a fixed-width font.
 
-    Columns read left to right as: identity, today's per-share price, what you
-    originally put in (cost basis), what it's worth now, overall gain, then
-    today's % move. (The $ amount for today's move is deliberately left out —
-    %CHG alone conveys direction and size, and the combined row was wide
-    enough to overflow narrower phone screens, which wrap instead of
-    scrolling a Telegram code block.)"""
-    header = f"{'SYMBOL':<7}{'PRICE':>9}{'COST':>10}{'VALUE':>10}{'GAIN%':>8}{'%CHG':>8}"
+    Columns read left to right as: identity, what it's worth now, overall
+    gain, then today's move in both dollars and percent (dollar first,
+    matching the "$X (+Y%)" convention used elsewhere in the report).
+    Price and cost basis are dropped — they're per-share/original-entry
+    detail this table doesn't need daily (see /price, /export), and
+    dropping them is what makes room for today's $ move alongside %CHG
+    without overflowing narrower phone screens."""
+    header = f"{'SYMBOL':<7}{'VALUE':>10}{'GAIN%':>8}{'$CHG':>9}{'%CHG':>8}"
     lines = [header, "-" * len(header)]
     for h in holdings:
         currency = h["currency"]
-        price_str = fmt_money(h["current_price"], currency, privacy, decimals=2)
-        cost_str = fmt_money(h["cost_basis"], currency, privacy, decimals=0)
         value_str = fmt_money(h["current_value"], currency, privacy, decimals=0)
         # Percentages stay visible in privacy mode — only $ amounts are
         # masked (matches /privacy's own documented behavior, and how /list
         # and the market-open/close pings already treat these same figures).
         gain_str = f"{h['unrealized_gain_pct']:+.1f}%"
+        chg_dollar_str = fmt_money(h["daily_change_$"], currency, privacy, show_sign=True, decimals=0)
         pct_str = f"{h['daily_change_%']:+.1f}%"
         lines.append(
-            f"{h['symbol']:<7}{price_str:>9}{cost_str:>10}{value_str:>10}{gain_str:>8}{pct_str:>8}"
+            f"{h['symbol']:<7}{value_str:>10}{gain_str:>8}{chg_dollar_str:>9}{pct_str:>8}"
         )
     return "\n".join(lines)
 
