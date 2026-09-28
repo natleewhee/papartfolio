@@ -57,8 +57,9 @@ IBKR_RECONCILE_CATCHUP_TIME = "20:00"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Markets to ping open/close for — only fires if you actually hold something
-# in that currency. Times are in each market's own timezone (weekdays only,
-# no holiday calendar).
+# in that currency. Times are in each market's own timezone, weekdays only.
+# The US market additionally follows the NYSE holiday/half-day calendar
+# (market_calendar.py); early_close is NYSE's fixed half-day close.
 MARKETS = {
     "US": {
         "label": "US Market (NYSE/NASDAQ)",
@@ -66,6 +67,7 @@ MARKETS = {
         "timezone": "America/New_York",
         "open": (9, 30),
         "close": (16, 0),
+        "early_close": (13, 0),
     },
     "SG": {
         "label": "SG Market (SGX)",

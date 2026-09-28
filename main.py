@@ -26,6 +26,7 @@ from market_notifications import notify_us_open, notify_us_close, notify_sg_open
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
 import job_monitor
+from market_calendar import run_on_us_trading_days, run_if_us_closes_at, run_if_last_us_session_traded
 from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
 
 import logging
@@ -198,22 +199,39 @@ def main():
     ]
     for market_key, event, func in market_jobs:
         market = MARKETS[market_key]
-        hour, minute = market[event]
+        tz = pytz.timezone(market["timezone"])
         # Open notifications fire 30s after the bell — quote feeds can lag
         # the actual opening print by a few seconds, so fetching at :00 sharp
         # risked reporting a stale/misleading first move (e.g. showing a
         # small gain when the stock actually opened down several percent).
         second = 30 if event == "open" else 0
-        scheduler.add_job(
-            func,
-            CronTrigger(
-                hour=hour, minute=minute, second=second,
-                day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"]),
-            ),
-            id=f"market_{market_key.lower()}_{event}",
-            name=f"{market['label']} {event}",
-            replace_existing=True,
-        )
+        job_id = f"market_{market_key.lower()}_{event}"
+        name = f"{market['label']} {event}"
+
+        if market_key != "US":
+            hour, minute = market[event]
+            scheduler.add_job(
+                func,
+                CronTrigger(hour=hour, minute=minute, second=second, day_of_week="mon-fri", timezone=tz),
+                id=job_id, name=name, replace_existing=True,
+            )
+        elif event == "open":
+            hour, minute = market["open"]
+            scheduler.add_job(
+                run_on_us_trading_days(func),
+                CronTrigger(hour=hour, minute=minute, second=second, day_of_week="mon-fri", timezone=tz),
+                id=job_id, name=name, replace_existing=True,
+            )
+        else:
+            # Scheduled at both the normal and the half-day close; each copy
+            # only runs when it matches that day's actual close.
+            for suffix, close_hm in (("", market["close"]), ("_early", market["early_close"])):
+                hour, minute = close_hm
+                scheduler.add_job(
+                    run_if_us_closes_at(func, close_hm),
+                    CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=tz),
+                    id=job_id + suffix, name=name + (" (half-day)" if suffix else ""), replace_existing=True,
+                )
 
     # IBKR Flex holdings reconciliation — two passes per day.
     #
@@ -228,25 +246,34 @@ def main():
     #
     # Silently disabled if IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID aren't set.
     if ibkr_configured():
+        def _plus_10_min(hm):
+            total = (hm[0] * 60 + hm[1] + 10) % (24 * 60)
+            return divmod(total, 60)
+
         for market_key in ("US", "SG"):
             market = MARKETS[market_key]
-            hour, minute = market["close"]
-            offset_total_minutes = (hour * 60 + minute + 10) % (24 * 60)
-            close_hour, close_minute = divmod(offset_total_minutes, 60)
-            scheduler.add_job(
-                run_reconciliation,
-                CronTrigger(
-                    hour=close_hour, minute=close_minute,
-                    day_of_week="mon-fri", timezone=pytz.timezone(market["timezone"]),
-                ),
-                id=f"ibkr_reconcile_{market_key.lower()}",
-                name=f"IBKR Reconcile ({market['label']})",
-                replace_existing=True,
-            )
+            tz = pytz.timezone(market["timezone"])
+            job_id = f"ibkr_reconcile_{market_key.lower()}"
+            name = f"IBKR Reconcile ({market['label']})"
+            if market_key != "US":
+                close_hour, close_minute = _plus_10_min(market["close"])
+                scheduler.add_job(
+                    run_reconciliation,
+                    CronTrigger(hour=close_hour, minute=close_minute, day_of_week="mon-fri", timezone=tz),
+                    id=job_id, name=name, replace_existing=True,
+                )
+                continue
+            for suffix, close_hm in (("", market["close"]), ("_early", market["early_close"])):
+                close_hour, close_minute = _plus_10_min(close_hm)
+                scheduler.add_job(
+                    run_if_us_closes_at(run_reconciliation, close_hm),
+                    CronTrigger(hour=close_hour, minute=close_minute, day_of_week="mon-fri", timezone=tz),
+                    id=job_id + suffix, name=name + (" (half-day)" if suffix else ""), replace_existing=True,
+                )
 
         catchup_hour, catchup_minute = map(int, IBKR_RECONCILE_CATCHUP_TIME.split(":"))
         scheduler.add_job(
-            run_reconciliation,
+            run_if_last_us_session_traded(run_reconciliation),
             CronTrigger(
                 hour=catchup_hour, minute=catchup_minute,
                 day_of_week="mon-fri", timezone=pytz.timezone(TIMEZONE),
