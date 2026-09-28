@@ -95,6 +95,14 @@ alerts.py             Price threshold alert evaluation, checked every 15
 market_notifications.py   Market open/close Telegram pings — no-ops if
                       nothing is held in that market's currency.
 
+market_calendar.py    NYSE holiday/half-day lookups (exchange_calendars,
+                      XNYS) + job wrappers: US open ping skips holidays;
+                      US close ping and post-close reconcile are scheduled
+                      at both 16:00 and 13:00 ET and each runs only when it
+                      matches that day's real close; the evening catch-up
+                      skips when the prior US weekday was a holiday. Every
+                      lookup fails open (treated as a normal trading day).
+
 job_monitor.py        APScheduler listener: messages you once when a job
                       raises past its own error handling or misses its
                       run time, stays quiet while it keeps failing, and
@@ -290,9 +298,9 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
 |---|---|---|
 | Daily report | `DAILY_REPORT_TIME` (default 20:30 SGT); Mon–Fri, or Tue–Sat when the time is before SG market open (`config.daily_report_day_of_week`) | Live-reschedulable via `/settime` |
 | Price alert check | Every 15 min | |
-| Market open/close pings | Per-market open/close time (own timezone), weekdays | Open pings fire +30s (quote-feed lag); no-op if nothing held in that currency |
-| IBKR reconcile (early) | 10 min after each market's close, that market's own timezone | Best-effort; may re-read the previous day's snapshot (see §5) |
-| IBKR reconcile (catch-up) | `IBKR_RECONCILE_CATCHUP_TIME` (default 20:00 SGT), weekdays | Added because the early pass can be too early relative to IBKR's own EOD batch |
+| Market open/close pings | Per-market open/close time (own timezone), weekdays | Open pings fire +30s (quote-feed lag); no-op if nothing held in that currency. US: skips NYSE holidays; close ping also scheduled at the 13:00 ET half-day close (`market_us_close_early`), only one of the two runs per day |
+| IBKR reconcile (early) | 10 min after each market's close, that market's own timezone | Best-effort; may re-read the previous day's snapshot (see §5). US follows holidays/half-days like the close ping |
+| IBKR reconcile (catch-up) | `IBKR_RECONCILE_CATCHUP_TIME` (default 20:00 SGT), weekdays | Added because the early pass can be too early relative to IBKR's own EOD batch. Skipped when the prior US weekday was an NYSE holiday |
 
 ---
 
@@ -333,9 +341,8 @@ mixing the two caused day-boundary flakiness in `test_earnings.py` (fixed).
 - Single-user only — `TELEGRAM_USER_ID` is hardcoded, no multi-tenancy.
 - IBKR integration is Flex-only (EOD, read-only); no live/real-time broker
   feed, and no support for brokers other than IBKR.
-- No holiday calendar for market open/close pings or reconciliation
-  scheduling — a market holiday just means those jobs no-op harmlessly
-  (no holdings priced that day) rather than being skipped intelligently.
+- Holiday awareness is US-only (NYSE via `market_calendar.py`); SG market
+  pings/reconciliation still fire on SGX holidays.
 - No staging environment; `main` deploys straight to Render.
 - AI brief quality depends entirely on the model's web search results for
   that day — no fallback content if search comes back thin.

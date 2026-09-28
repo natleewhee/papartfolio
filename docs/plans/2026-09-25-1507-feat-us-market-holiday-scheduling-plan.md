@@ -4,7 +4,7 @@ type: feat
 date: 2026-09-25
 topic: us-market-holiday-scheduling
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: requirements-only
+artifact_readiness: implemented
 product_contract_source: ce-brainstorm
 execution: code
 ---
@@ -92,6 +92,15 @@ normal 4pm ET. The daily report is unaffected either way.
   existing fail-open conventions elsewhere (e.g. IBKR reconciliation
   refusing to wipe holdings on a suspicious empty report rather than
   trusting a likely-broken fetch). Governs R8.
+
+### Implementation notes
+
+- Calendar: `exchange_calendars` (XNYS), wrapped by `market_calendar.py`.
+- Half-days: close-time jobs are registered at both 16:00 and 13:00 ET;
+  each runs only when it matches that day's real close (NYSE half-days
+  always close at 13:00).
+- R3's "holiday" for the 20:00 SGT catch-up is the prior US weekday — the
+  session whose EOD data the catch-up would pick up.
 
 Key Flows are omitted: this is scheduling-timing behavior, not new
 multi-step user-facing behavior — Requirements and Acceptance Examples

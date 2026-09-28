@@ -575,7 +575,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  Last synced: {last_synced if last_synced else 'never yet'}")
         lines.append("")
 
-    lines.append("_Market pings & reconciliation: Mon-Fri (real trading weekdays). Daily report days shown above. Market pings fire only for markets you hold._")
+    lines.append("_Market pings & reconciliation: Mon-Fri. US jobs skip NYSE holidays and follow half-day early closes (1pm ET). Daily report days shown above. Market pings fire only for markets you hold._")
     lines.append("_(Price alerts are separate & event-based — see /alerts.)_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
