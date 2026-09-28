@@ -312,3 +312,45 @@ def test_concentration_flags_heavy_holdings_largest_first():
 def test_concentration_silent_when_balanced_or_single_holding():
     assert _concentration_line([{"symbol": "A", "pct_of_portfolio": 25.0}, {"symbol": "B", "pct_of_portfolio": 25.0}]) == ""
     assert _concentration_line([{"symbol": "A", "pct_of_portfolio": 100.0}]) == ""
+
+
+# ---------- level buttons ----------
+
+from telegram_handler import _signals, levels_keyboard
+
+
+def test_signals_returns_flagged_symbols_deduped_in_urgency_order(monkeypatch):
+    _no_watchlist(monkeypatch)
+    _empty_checks(monkeypatch)
+    monkeypatch.setattr(telegram_handler, "near_ema200_flags", lambda rows: [("TSLA", 1.2), ("NVDA", 1.5)])
+    metrics = {"holdings": [
+        {"symbol": "NVDA", "current_price": 100, "daily_change_%": 5.0},
+        {"symbol": "TSLA", "current_price": 250, "daily_change_%": 0.2},
+    ]}
+    text, flagged = _signals(metrics)
+    assert text.startswith("📡 *Signals*")
+    assert flagged == ["NVDA", "TSLA"]
+
+
+def test_levels_keyboard_rows_of_three_capped_at_six():
+    kb = levels_keyboard([f"S{i}" for i in range(8)])
+    rows = kb["inline_keyboard"]
+    assert [len(r) for r in rows] == [3, 3]
+    assert rows[0][0] == {"text": "📉📈 S0", "callback_data": "levels:S0"}
+    assert levels_keyboard([]) is None
+
+
+def test_send_telegram_message_attaches_markup_to_last_chunk_only(monkeypatch):
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append(json)
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(telegram_handler.requests, "post", fake_post)
+    markup = {"inline_keyboard": [[{"text": "x", "callback_data": "levels:X"}]]}
+    text = "\n".join(["x" * 100] * 60)  # > one chunk
+    asyncio.run(send_telegram_message(text, reply_markup=markup))
+    assert len(calls) > 1
+    assert all("reply_markup" not in c for c in calls[:-1])
+    assert calls[-1]["reply_markup"] == markup

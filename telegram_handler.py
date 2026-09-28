@@ -49,7 +49,7 @@ def chunk_message(text, limit=TELEGRAM_MESSAGE_LIMIT):
         chunks.append("\n".join(current))
     return chunks
 
-async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
+async def send_telegram_message(text: str, parse_mode: str = "Markdown", reply_markup: dict = None):
     """Send a message via the Telegram Bot API.
 
     Runs the (blocking) HTTP call off the event loop — this bot's own
@@ -61,26 +61,31 @@ async def send_telegram_message(text: str, parse_mode: str = "Markdown"):
     interface is Telegram messages, so a formatting glitch shouldn't
     silently swallow the whole thing. Long messages are chunked so a big
     enough portfolio/watchlist doesn't get rejected outright for exceeding
-    Telegram's per-message length limit.
+    Telegram's per-message length limit. `reply_markup` (a Bot API
+    InlineKeyboardMarkup dict) is attached to the last chunk only.
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    async def _send(chunk, mode):
+    async def _send(chunk, mode, markup):
         payload = {"chat_id": TELEGRAM_USER_ID, "text": chunk}
         if mode:
             payload["parse_mode"] = mode
+        if markup:
+            payload["reply_markup"] = markup
         return await asyncio.to_thread(requests.post, url, json=payload, timeout=10)
 
     ok = True
-    for chunk in chunk_message(text):
+    chunks = chunk_message(text)
+    for i, chunk in enumerate(chunks):
+        markup = reply_markup if i == len(chunks) - 1 else None
         try:
-            response = await _send(chunk, parse_mode)
+            response = await _send(chunk, parse_mode, markup)
             if response.status_code == 200:
                 continue
 
             if parse_mode and "can't parse entities" in response.text.lower():
                 logger.warning("⚠️ Markdown parse error sending Telegram message — retrying this chunk as plain text")
-                response = await _send(chunk, None)
+                response = await _send(chunk, None, markup)
                 if response.status_code == 200:
                     continue
 
@@ -149,6 +154,9 @@ def _concentration_line(holdings):
     return "⚖️ Concentration: " + ", ".join(f"{h['symbol']} {h['pct_of_portfolio']:.0f}% of portfolio" for h in heavy)
 
 def _build_signals_section(metrics, population=None, support_results=None):
+    return _signals(metrics, population, support_results)[0]
+
+def _signals(metrics, population=None, support_results=None):
     """Consolidated 'what needs attention today' section — big movers,
     support/resistance proximity, 200 EMA proximity, concentration
     (holdings only), and earnings events,
@@ -157,7 +165,9 @@ def _build_signals_section(metrics, population=None, support_results=None):
     independent of the AI brief's own relative-to-volatility definition.
     Earnings uses the same flag-only criteria the old standalone Earnings
     Watch section used (upcoming within 14 days, reported within 3).
-    Returns "" if nothing qualifies.
+    Returns (text, flagged_symbols): text is "" if nothing qualifies;
+    flagged_symbols are the movers/support/EMA symbols, most urgent first,
+    for the report's level buttons.
 
     `population` (from _signals_population) and `support_results` (from
     _resolve_signals_support) are computed locally when not given, so this
@@ -165,7 +175,7 @@ def _build_signals_section(metrics, population=None, support_results=None):
     if population is None:
         population = _signals_population(metrics)
     if not population:
-        return ""
+        return "", []
 
     movers = [
         r for r in population
@@ -187,9 +197,11 @@ def _build_signals_section(metrics, population=None, support_results=None):
         }
         for r in population
     ]
-    support_line = format_near_support_line(near_support_flags(support_rows))
+    support_flags = near_support_flags(support_rows)
+    support_line = format_near_support_line(support_flags)
 
-    ema_line = format_near_ema_line(near_ema200_flags(population))
+    ema_flags = near_ema200_flags(population)
+    ema_line = format_near_ema_line(ema_flags)
     concentration_line = _concentration_line(metrics["holdings"])
 
     earnings_results = fetch_earnings_bulk([r["symbol"] for r in population])
@@ -203,9 +215,23 @@ def _build_signals_section(metrics, population=None, support_results=None):
     ]
 
     lines = [line for line in (movers_line, support_line, ema_line, concentration_line) if line] + earnings_lines
+    flagged = list(dict.fromkeys(
+        [r["symbol"] for r in movers] + [f[0] for f in support_flags] + [f[0] for f in ema_flags]
+    ))
     if not lines:
-        return ""
-    return "📡 *Signals*\n" + "\n".join(lines)
+        return "", flagged
+    return "📡 *Signals*\n" + "\n".join(lines), flagged
+
+MAX_LEVEL_BUTTONS = 6
+
+def levels_keyboard(symbols):
+    """Inline keyboard (Bot API dict) with a support/resistance button per
+    flagged symbol, 3 per row; None if there are none. Handled by
+    bot_handlers.on_button."""
+    buttons = [{"text": f"📉📈 {s}", "callback_data": f"levels:{s}"} for s in symbols[:MAX_LEVEL_BUTTONS]]
+    if not buttons:
+        return None
+    return {"inline_keyboard": [buttons[i:i + 3] for i in range(0, len(buttons), 3)]}
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
     """Generate and send daily portfolio report."""
@@ -229,7 +255,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         # before the raw numbers, not after them.
         population = await asyncio.to_thread(_signals_population, metrics)
         support_results = await asyncio.to_thread(_resolve_signals_support, population)
-        signals_section = await asyncio.to_thread(_build_signals_section, metrics, population, support_results)
+        signals_section, flagged = await asyncio.to_thread(_signals, metrics, population, support_results)
         benchmark_line = benchmark.comparison_line(
             metrics["daily_change_%"], await asyncio.to_thread(benchmark.daily_change_pct)
         )
@@ -269,7 +295,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         if not compact:
             report += "\n" + f"```\n{format_holdings_table(metrics['holdings'], privacy)}\n```"
 
-        await send_telegram_message(report)
+        await send_telegram_message(report, reply_markup=levels_keyboard(flagged))
         logger.info("✅ Daily report sent")
 
     except Exception as e:
