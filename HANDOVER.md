@@ -98,6 +98,11 @@ alerts.py             Price threshold alert evaluation, checked every 15
 market_notifications.py   Market open/close Telegram pings — no-ops if
                       nothing is held in that market's currency.
 
+benchmark.py          S&P 500 (SPY) comparison: daily change for the
+                      report's "vs S&P 500" line, and change since a
+                      snapshot date for /week and /month. Returns None on
+                      any data failure so the line is simply omitted.
+
 market_calendar.py    NYSE holiday/half-day lookups (exchange_calendars,
                       XNYS) + job wrappers: US open ping skips holidays;
                       US close ping and post-close reconcile are scheduled
@@ -215,6 +220,12 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
   today's dollar move (`$CHG`, from `daily_change_$`) next to its percent
   — the same "$ then %" convention used in the report's `Today` line.
   This same table now backs both the daily report and `/list`.
+- **Benchmark alignment**: a portfolio snapshot dated D is taken before
+  that day's US session closes (for both early-morning and 20:30 SGT report
+  times), so it reflects the prior US close. `benchmark.change_pct_since`
+  therefore bases SPY on the last close *before* D. The benchmark is in USD
+  with no FX adjustment, while the portfolio % is in SGD — a small,
+  accepted mismatch. Configure via `BENCHMARK_SYMBOL`/`BENCHMARK_LABEL`.
 - **IBKR Flex is EOD-only, once a day**: IBKR's own Flex "Activity" data
   refreshes once daily at their own close-of-business batch — querying it
   more often just re-reads the same snapshot. Two scheduled passes exist
