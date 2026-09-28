@@ -27,6 +27,7 @@ from earnings import fetch_earnings, fetch_earnings_bulk, earnings_flags, format
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_last_reconciled_at
 from ai_brief import generate_market_brief, is_configured as ai_brief_configured, key_preview as ai_brief_key_preview
 from telegram_handler import send_daily_report, chunk_message
+import benchmark
 from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
 from datetime import datetime
 import logging
@@ -462,6 +463,11 @@ async def _cmd_period_performance(update: Update, days: int, label: str):
         f"Now: {fmt_money(perf['current_value'], currency, privacy)}\n"
         f"Change: {emoji} {fmt_money(perf['change'], currency, privacy, show_sign=True)} ({perf['change_pct']:+.2f}%)"
     )
+    benchmark_line = benchmark.comparison_line(
+        perf["change_pct"], await asyncio.to_thread(benchmark.change_pct_since, perf["start_date"])
+    )
+    if benchmark_line:
+        msg += "\n" + benchmark_line
     # Deposits/withdrawals since the start date are already backed out of
     # Change above — surface the amount so it's clear why Change doesn't
     # match a naive (now - start) if you added/removed holdings meanwhile.

@@ -32,6 +32,11 @@ DAILY_REPORT_TIME = "20:30"
 # Portfolio totals are converted to this currency for the combined grand total
 HOME_CURRENCY = "SGD"
 
+# Benchmark shown next to portfolio performance (daily report, /week, /month).
+# Returns are in the benchmark's own currency (USD), without FX.
+BENCHMARK_SYMBOL = "SPY"
+BENCHMARK_LABEL = "S&P 500"
+
 # IBKR Flex Web Service (optional — holdings reconciliation after market
 # close). Both must be set for the feature to activate; leave unset to
 # disable it entirely, nothing else breaks. Set up first in IBKR Account

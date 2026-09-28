@@ -10,6 +10,7 @@ from support import (
     near_ema200_flags, format_near_ema_line,
 )
 from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
+import benchmark
 from datetime import datetime
 import pytz
 import logging
@@ -229,6 +230,9 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
         population = await asyncio.to_thread(_signals_population, metrics)
         support_results = await asyncio.to_thread(_resolve_signals_support, population)
         signals_section = await asyncio.to_thread(_build_signals_section, metrics, population, support_results)
+        benchmark_line = benchmark.comparison_line(
+            metrics["daily_change_%"], await asyncio.to_thread(benchmark.daily_change_pct)
+        )
 
         # Summary
         today = datetime.now(pytz.timezone(TIMEZONE))
@@ -239,6 +243,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE = None):
             f"Total: {fmt_money(metrics['total_value'], home_currency, privacy)}\n"
             f"Today: {emoji} {fmt_money(metrics['daily_change_$'], home_currency, privacy, show_sign=True)} "
             f"({metrics['daily_change_%']:+.2f}%)\n"
+        )
+        if benchmark_line:
+            report += benchmark_line + "\n"
+        report += (
             f"Gain: {fmt_money(metrics['unrealized_gain'], home_currency, privacy, show_sign=True)} "
             f"({metrics['unrealized_gain_pct']:+.2f}%)\n"
         )
