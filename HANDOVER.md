@@ -90,7 +90,10 @@ earnings.py           Next/last earnings date + result per symbol.
                       Finnhub calendar (US), yfinance (SGX fallback).
 
 alerts.py             Price threshold alert evaluation, checked every 15
-                      min by the scheduler.
+                      min by the scheduler — only for alerts whose market
+                      is open (market_calendar.is_market_open, incl. 15 min
+                      after close), so nights/weekends/holidays make no
+                      quote calls.
 
 market_notifications.py   Market open/close Telegram pings — no-ops if
                       nothing is held in that market's currency.
@@ -195,7 +198,10 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
   rather than share a calculation. Support/resistance and 200-EMA
   (`support.EMA_PERIOD`, `NEAR_EMA_THRESHOLD_PCT`) proximity checks cover
   holdings as well as the watchlist, computed once per report
-  (`_signals_population`, `_resolve_signals_support`). Earnings events
+  (`_signals_population`, `_resolve_signals_support`). A concentration
+  line flags any holding above 25% of the portfolio
+  (`CONCENTRATION_THRESHOLD_PCT`; skipped for a single-holding portfolio).
+  Earnings events
   (upcoming within 14 days, reported within 3) render as their own
   `📅`-prefixed lines, reusing the same fetch/flag helpers the old
   standalone Earnings Watch section used, just inside Signals instead of
@@ -297,7 +303,7 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
 | Job | Schedule | Notes |
 |---|---|---|
 | Daily report | `DAILY_REPORT_TIME` (default 20:30 SGT); Mon–Fri, or Tue–Sat when the time is before SG market open (`config.daily_report_day_of_week`) | Live-reschedulable via `/settime` |
-| Price alert check | Every 15 min | |
+| Price alert check | Every 15 min | Each alert only checked while its market is open (+15 min after close) |
 | Market open/close pings | Per-market open/close time (own timezone), weekdays | Open pings fire +30s (quote-feed lag); no-op if nothing held in that currency. US: skips NYSE holidays; close ping also scheduled at the 13:00 ET half-day close (`market_us_close_early`), only one of the two runs per day |
 | IBKR reconcile (early) | 10 min after each market's close, that market's own timezone | Best-effort; may re-read the previous day's snapshot (see §5). US follows holidays/half-days like the close ping |
 | IBKR reconcile (catch-up) | `IBKR_RECONCILE_CATCHUP_TIME` (default 20:00 SGT), weekdays | Added because the early pass can be too early relative to IBKR's own EOD batch. Skipped when the prior US weekday was an NYSE holiday |

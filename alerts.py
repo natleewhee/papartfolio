@@ -3,6 +3,7 @@ from fetcher import get_price, get_currency_for_symbol
 from portfolio import fmt_money
 from support import resolve_support_levels
 from telegram_handler import send_telegram_message
+from market_calendar import is_market_open, market_for_currency
 import asyncio
 import logging
 
@@ -15,8 +16,12 @@ async def check_price_alerts():
     Telegram (which would spam on a persistent fault). Each alert is guarded
     independently so one bad alert doesn't stop the rest of the batch. The
     underlying DB/price/send calls each already degrade gracefully on their own.
+
+    Alerts whose market is closed are skipped (the price can't have moved), so
+    nights/weekends/holidays don't burn quote-API calls. A symbol whose
+    currency maps to no known market is always checked.
     """
-    alerts = get_active_alerts()
+    alerts = [a for a in get_active_alerts() if _market_open_for(a["symbol"])]
 
     for alert in alerts:
         try:
@@ -26,6 +31,10 @@ async def check_price_alerts():
                 await _check_threshold_alert(alert)
         except Exception as e:
             logger.error(f"❌ Error checking alert #{alert.get('id')} ({alert.get('symbol')}): {e}")
+
+def _market_open_for(symbol):
+    market_key = market_for_currency(get_currency_for_symbol(symbol))
+    return market_key is None or is_market_open(market_key)
 
 async def _check_threshold_alert(alert):
     """direction is 'above' or 'below': threshold is a fixed price."""

@@ -84,3 +84,41 @@ def test_out_of_range_date_fails_open():
 ])
 def test_previous_weekday(day, expected):
     assert previous_weekday(day) == expected
+
+
+# ---------- is_market_open ----------
+
+import pytz
+from datetime import datetime
+from market_calendar import is_market_open, market_for_currency
+
+ET = pytz.timezone("America/New_York")
+SGT = pytz.timezone("Asia/Singapore")
+
+
+@pytest.mark.parametrize("when,expected", [
+    (ET.localize(datetime(2026, 11, 25, 9, 29)), False),   # before open
+    (ET.localize(datetime(2026, 11, 25, 9, 30)), True),
+    (ET.localize(datetime(2026, 11, 25, 16, 15)), True),   # close + grace
+    (ET.localize(datetime(2026, 11, 25, 16, 16)), False),
+    (ET.localize(datetime(2026, 11, 26, 11, 0)), False),   # Thanksgiving
+    (ET.localize(datetime(2026, 11, 27, 13, 30)), False),  # half-day, past 13:15
+    (ET.localize(datetime(2026, 11, 28, 11, 0)), False),   # Saturday
+])
+def test_us_market_open(when, expected):
+    assert is_market_open("US", when) is expected
+
+
+def test_us_market_open_accepts_other_timezones():
+    assert is_market_open("US", SGT.localize(datetime(2026, 11, 25, 23, 0)))  # 10:00 ET
+
+
+def test_sg_market_open():
+    assert is_market_open("SG", SGT.localize(datetime(2026, 11, 26, 12, 0)))  # Thanksgiving doesn't matter
+    assert not is_market_open("SG", SGT.localize(datetime(2026, 11, 26, 18, 0)))
+
+
+def test_market_for_currency():
+    assert market_for_currency("USD") == "US"
+    assert market_for_currency("SGD") == "SG"
+    assert market_for_currency("EUR") is None

@@ -293,3 +293,22 @@ def test_build_signals_section_uses_given_support_results(monkeypatch):
     result = _build_signals_section(metrics, population, support_results)
 
     assert "AAPL" in result
+
+
+# ---------- concentration ----------
+
+from telegram_handler import _concentration_line
+
+
+def test_concentration_flags_heavy_holdings_largest_first():
+    holdings = [
+        {"symbol": "AAPL", "pct_of_portfolio": 30.0},
+        {"symbol": "NVDA", "pct_of_portfolio": 45.4},
+        {"symbol": "MSFT", "pct_of_portfolio": 24.6},
+    ]
+    assert _concentration_line(holdings) == "⚖️ Concentration: NVDA 45% of portfolio, AAPL 30% of portfolio"
+
+
+def test_concentration_silent_when_balanced_or_single_holding():
+    assert _concentration_line([{"symbol": "A", "pct_of_portfolio": 25.0}, {"symbol": "B", "pct_of_portfolio": 25.0}]) == ""
+    assert _concentration_line([{"symbol": "A", "pct_of_portfolio": 100.0}]) == ""
