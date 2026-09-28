@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 MOVER_THRESHOLD_PCT = 3.0  # flat threshold, deliberately independent of ai_brief's relative-volatility definition
+CONCENTRATION_THRESHOLD_PCT = 25.0
 
 def chunk_message(text, limit=TELEGRAM_MESSAGE_LIMIT):
     """Split `text` into Telegram-safe chunks, breaking on line boundaries so
@@ -132,9 +133,24 @@ def _resolve_signals_support(population):
         (r["symbol"], r["current_price"], r["manual_st"], r["manual_mt"]) for r in population
     )
 
+def _concentration_line(holdings):
+    """Flag any holding above CONCENTRATION_THRESHOLD_PCT of the portfolio
+    (home-currency basis). Skipped for a single-holding portfolio, where it
+    would just repeat "100%" every day."""
+    if len(holdings) < 2:
+        return ""
+    heavy = sorted(
+        (h for h in holdings if h.get("pct_of_portfolio", 0) > CONCENTRATION_THRESHOLD_PCT),
+        key=lambda h: -h["pct_of_portfolio"],
+    )
+    if not heavy:
+        return ""
+    return "⚖️ Concentration: " + ", ".join(f"{h['symbol']} {h['pct_of_portfolio']:.0f}% of portfolio" for h in heavy)
+
 def _build_signals_section(metrics, population=None, support_results=None):
     """Consolidated 'what needs attention today' section — big movers,
-    support/resistance proximity, 200 EMA proximity, and earnings events,
+    support/resistance proximity, 200 EMA proximity, concentration
+    (holdings only), and earnings events,
     across holdings and watchlist — leading the report so the signal isn't
     buried under routine numbers. Movers use a flat threshold, deliberately
     independent of the AI brief's own relative-to-volatility definition.
@@ -173,6 +189,7 @@ def _build_signals_section(metrics, population=None, support_results=None):
     support_line = format_near_support_line(near_support_flags(support_rows))
 
     ema_line = format_near_ema_line(near_ema200_flags(population))
+    concentration_line = _concentration_line(metrics["holdings"])
 
     earnings_results = fetch_earnings_bulk([r["symbol"] for r in population])
     upcoming, recent = earnings_flags(earnings_results)
@@ -184,7 +201,7 @@ def _build_signals_section(metrics, population=None, support_results=None):
         for symbol, last_event in recent
     ]
 
-    lines = [line for line in (movers_line, support_line, ema_line) if line] + earnings_lines
+    lines = [line for line in (movers_line, support_line, ema_line, concentration_line) if line] + earnings_lines
     if not lines:
         return ""
     return "📡 *Signals*\n" + "\n".join(lines)

@@ -90,3 +90,28 @@ def run_if_last_us_session_traded(func):
             return
         await func()
     return wrapper
+
+
+CLOSE_GRACE_MINUTES = 15
+
+
+def is_market_open(market_key, now=None):
+    """Whether `market_key`'s regular session is open at `now` (tz-aware), plus
+    CLOSE_GRACE_MINUTES after the bell so a check lands on the closing price.
+    US honours NYSE holidays/half-days; SG uses plain weekday hours."""
+    market = MARKETS[market_key]
+    tz = pytz.timezone(market["timezone"])
+    local = (now or datetime.now(tz)).astimezone(tz)
+    if local.weekday() >= 5:
+        return False
+    close_hm = us_close_time(local.date()) if market_key == "US" else market["close"]
+    if close_hm is None:
+        return False
+    minutes = local.hour * 60 + local.minute
+    open_minutes = market["open"][0] * 60 + market["open"][1]
+    close_minutes = close_hm[0] * 60 + close_hm[1] + CLOSE_GRACE_MINUTES
+    return open_minutes <= minutes <= close_minutes
+
+
+def market_for_currency(currency):
+    return next((key for key, m in MARKETS.items() if m["currency"] == currency), None)
