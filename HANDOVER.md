@@ -124,7 +124,10 @@ job_monitor.py        APScheduler listener: messages you once when a job
 
 ibkr_flex.py          IBKR Flex Web Service integration: request → poll →
                       parse XML → diff against the bot's holdings table →
-                      apply add/update/remove. Also cross-checks the bot's
+                      apply add/update/remove. Also records realized P&L
+                      (Trades) and dividends/withholding tax (Cash
+                      Transactions) into income_events when the Flex
+                      Query includes those sections. Also cross-checks the bot's
                       live pricing against IBKR's own mark price. Silently
                       disabled without IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID.
 
@@ -178,6 +181,13 @@ No circular imports; `ai_brief.py` reaches into `support.py`'s private
   `active`).
 - **watchlist** — symbols tracked for support levels without necessarily
   being held; supports manual ST/MT override prices per symbol.
+- **income_events** — realized P&L (`kind='realized'`), dividends
+  (`'dividend'`), and withholding tax (`'tax'`, negative) from IBKR Flex.
+  `id` is IBKR's transaction ID (`trade:`/`cash:` prefix), so re-reading a
+  report is idempotent. Amounts are signed, in their own currency;
+  `portfolio.get_income_since` converts at today's FX rate. Shown as a
+  YTD line in `/list` and a weekly line in the digest, only once events
+  exist.
 
 `init_db()` runs `CREATE TABLE IF NOT EXISTS` for all tables, then applies
 additive migrations (`ALTER TABLE ... ADD COLUMN`, swallowing the
@@ -306,7 +316,7 @@ Optional (feature self-disables if unset):
 
 | Var | Enables |
 |---|---|
-| `IBKR_FLEX_TOKEN`, `IBKR_FLEX_QUERY_ID` | IBKR reconciliation (`/reconcile`, scheduled passes). Both required together. Set up via IBKR Account Management → Reports → Flex Queries (new Activity/Open Positions query with Symbol, Position, Cost Basis Price, Currency, Asset Category columns) → Reports → Settings → Flex Web Service for the token. |
+| `IBKR_FLEX_TOKEN`, `IBKR_FLEX_QUERY_ID` | IBKR reconciliation (`/reconcile`, scheduled passes). Both required together. Set up via IBKR Account Management → Reports → Flex Queries (new Activity/Open Positions query with Symbol, Position, Cost Basis Price, Currency, Asset Category columns) → Reports → Settings → Flex Web Service for the token. For realized P&L/dividends, also add the Trades and Cash Transactions sections and a "Last 7 Calendar Days" period (see `config.py`). |
 | `ANTHROPIC_API_KEY` | AI market brief (`/brief`, on-demand only) |
 
 See `.env.example` for the template. **Render-specific gotcha**: an env
@@ -373,6 +383,10 @@ mixing the two caused day-boundary flakiness in `test_earnings.py` (fixed).
 - Single-user only — `TELEGRAM_USER_ID` is hardcoded, no multi-tenancy.
 - IBKR integration is Flex-only (EOD, read-only); no live/real-time broker
   feed, and no support for brokers other than IBKR.
+- Realized P&L/dividends only cover what the Flex Query's period window has
+  returned since the feature was enabled — no historical backfill (a
+  one-off run with a longer period would do it; de-dup makes that safe).
+  Converted at today's FX, not the rate on the event date.
 - Holiday awareness is US-only (NYSE via `market_calendar.py`); SG market
   pings/reconciliation still fire on SGX holidays.
 - No staging environment; `main` deploys straight to Render.

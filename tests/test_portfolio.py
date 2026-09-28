@@ -230,3 +230,44 @@ def test_get_period_performance_no_contribution_change(monkeypatch):
 def test_get_period_performance_none_when_no_snapshot(monkeypatch):
     monkeypatch.setattr(portfolio, "get_earliest_aggregate_since", lambda cutoff: None)
     assert portfolio.get_period_performance(7) is None
+
+
+# ---------- income ----------
+
+def test_get_income_since_converts_and_nets_withholding(monkeypatch):
+    monkeypatch.setattr(portfolio, "HOME_CURRENCY", "SGD")
+    monkeypatch.setattr(portfolio, "get_income_totals_since", lambda date: {
+        "realized": {"USD": 100.0, "SGD": 10.0},
+        "dividend": {"USD": 20.0},
+        "tax": {"USD": -6.0},
+    })
+    monkeypatch.setattr(portfolio, "fetch_fx_rate", lambda frm, to: 1.3)
+    income = portfolio.get_income_since("2026-01-01")
+    assert income["realized"] == pytest.approx(140.0)
+    assert income["dividends"] == pytest.approx(18.2)
+    assert income["currency"] == "SGD"
+
+
+def test_get_income_since_none_when_nothing_recorded(monkeypatch):
+    monkeypatch.setattr(portfolio, "get_income_totals_since", lambda date: {})
+    assert portfolio.get_income_since("2026-01-01") is None
+
+
+def test_format_income_line():
+    income = {"realized": 140.0, "dividends": 18.2, "currency": "SGD"}
+    assert portfolio.format_income_line(income, "YTD", False) == \
+        "Realized YTD: +S$140.00 · Dividends YTD (net): +S$18.20"
+    assert "140" not in portfolio.format_income_line(income, "YTD", True)
+    assert portfolio.format_income_line(None, "YTD", False) == ""
+
+
+def test_get_income_since_excludes_currency_without_fx_rate(monkeypatch):
+    monkeypatch.setattr(portfolio, "HOME_CURRENCY", "SGD")
+    monkeypatch.setattr(portfolio, "get_income_totals_since", lambda date: {
+        "realized": {"USD": 1000.0, "SGD": 10.0},
+    })
+    monkeypatch.setattr(portfolio, "fetch_fx_rate", lambda frm, to: None)
+    income = portfolio.get_income_since("2026-01-01")
+    assert income["realized"] == pytest.approx(10.0)
+    assert income["fx_missing"] == ["USD"]
+    assert "(excl. USD — no FX rate)" in portfolio.format_income_line(income, "YTD", False)

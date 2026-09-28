@@ -15,7 +15,7 @@ from portfolio_db import (
 )
 from portfolio import (
     calculate_portfolio_metrics, get_period_performance, get_currency_breakdown,
-    fmt_money, format_shares, format_holdings_table,
+    fmt_money, format_shares, format_holdings_table, get_income_since, format_income_line,
 )
 from support import (
     compute_resistance_levels,
@@ -332,6 +332,11 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(breakdown) > 1:
             mix = " / ".join(f"{ccy} {pct:.0f}%" for ccy, pct in sorted(breakdown.items(), key=lambda x: -x[1]))
             msg += f"\nCurrency Mix: {mix}"
+
+        year_start = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-01-01")
+        income_line = format_income_line(await asyncio.to_thread(get_income_since, year_start), "YTD", privacy)
+        if income_line:
+            msg += f"\n{income_line}"
 
         for currency, rate in metrics["fx_rates"].items():
             msg += f"\nFX: 1 {currency} = {fmt_money(rate, home_currency, decimals=4)}"

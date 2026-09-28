@@ -31,3 +31,9 @@ def test_digest_privacy_and_missing_parts():
     msg = build_digest(PERF, None, [], [], privacy=True)
     assert "250" not in msg and "•••" in msg
     assert "S&P" not in msg and "Best" not in msg and "Earnings" not in msg
+
+
+def test_digest_includes_income_when_recorded():
+    income = {"realized": 140.0, "dividends": 18.2, "currency": "SGD"}
+    msg = build_digest(PERF, None, [], [], privacy=False, income=income)
+    assert "Realized this week: +S$140.00 · Dividends this week (net): +S$18.20" in msg

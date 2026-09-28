@@ -91,6 +91,21 @@ def init_db():
         )
     """)
 
+    # Realized P&L and dividend/withholding cash events from IBKR Flex. id is
+    # IBKR's own transaction ID (namespaced by source), so re-reading the same
+    # report is idempotent. amount is signed, in `currency`.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS income_events (
+            id TEXT PRIMARY KEY,
+            date DATE NOT NULL,
+            symbol TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
 
     # Migration: currency column (added after the original schema). Existing
@@ -279,6 +294,52 @@ def get_snapshot_prices_on(date):
         return {symbol: price for symbol, price in rows}
     except Exception as e:
         logger.error(f"❌ Error fetching snapshots for {date}: {e}")
+        return {}
+
+# ==================== INCOME (realized P&L, dividends) ====================
+
+def save_income_events(events):
+    """Insert events not already stored (by id). Returns the newly inserted ones."""
+    events = list(events)
+    if not events:
+        return []
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        ids = [e["id"] for e in events]
+        cursor.execute(
+            f"SELECT id FROM income_events WHERE id IN ({','.join('?' * len(ids))})", ids
+        )
+        existing = {row[0] for row in cursor.fetchall()}
+        new = [e for e in events if e["id"] not in existing]
+        for e in new:
+            cursor.execute(
+                "INSERT OR IGNORE INTO income_events (id, date, symbol, kind, amount, currency) VALUES (?, ?, ?, ?, ?, ?)",
+                (e["id"], e["date"], e["symbol"], e["kind"], e["amount"], e["currency"]),
+            )
+        conn.commit()
+        conn.close()
+        return new
+    except Exception as e:
+        logger.error(f"❌ Error saving income events: {e}")
+        return []
+
+def get_income_totals_since(date):
+    """{kind: {currency: summed amount}} for events on/after `date` (YYYY-MM-DD)."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT kind, currency, SUM(amount) FROM income_events WHERE date >= ? GROUP BY kind, currency",
+            (date,),
+        )
+        totals = {}
+        for kind, currency, amount in cursor.fetchall():
+            totals.setdefault(kind, {})[currency] = amount
+        conn.close()
+        return totals
+    except Exception as e:
+        logger.error(f"❌ Error fetching income totals since {date}: {e}")
         return {}
 
 # ==================== SETTINGS ====================

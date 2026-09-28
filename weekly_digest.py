@@ -1,12 +1,13 @@
 """Saturday-morning week in review: the week's performance vs the benchmark,
-best/worst holding, and earnings coming up in the next 7 days."""
+best/worst holding, realized P&L/dividends recorded this week (IBKR), and
+earnings coming up in the next 7 days."""
 import asyncio
 import logging
 
 import benchmark
 from earnings import fetch_earnings_bulk, earnings_flags, format_earnings_line
 from fetcher import get_currency_for_symbol
-from portfolio import calculate_portfolio_metrics, get_period_performance, fmt_money
+from portfolio import calculate_portfolio_metrics, get_period_performance, fmt_money, get_income_since, format_income_line
 from portfolio_db import get_setting, get_snapshot_prices_on, get_watchlist
 from telegram_handler import send_telegram_message
 
@@ -25,7 +26,7 @@ def holding_week_moves(holdings, start_prices):
     return sorted(moves, key=lambda m: -m[1])
 
 
-def build_digest(perf, benchmark_pct, moves, upcoming, privacy):
+def build_digest(perf, benchmark_pct, moves, upcoming, privacy, income=None):
     currency = perf["currency"]
     emoji = "🟢" if perf["change_pct"] >= 0 else "🔴"
     lines = [
@@ -41,6 +42,9 @@ def build_digest(perf, benchmark_pct, moves, upcoming, privacy):
         lines.append(f"Best: {best} {best_pct:+.1f}% · Worst: {worst} {worst_pct:+.1f}%")
     elif moves:
         lines.append(f"{moves[0][0]}: {moves[0][1]:+.1f}%")
+    income_line = format_income_line(income, "this week", privacy)
+    if income_line:
+        lines.append(income_line)
     if upcoming:
         lines += ["", "*Earnings next week*"]
         lines += [
@@ -58,7 +62,7 @@ def _gather():
     moves = holding_week_moves(metrics["holdings"], get_snapshot_prices_on(perf["start_date"]))
     symbols = list(dict.fromkeys([h["symbol"] for h in metrics["holdings"]] + [w["symbol"] for w in get_watchlist()]))
     upcoming, _ = earnings_flags(fetch_earnings_bulk(symbols), upcoming_days=NEXT_WEEK_DAYS, recent_days=-1)
-    return perf, benchmark.change_pct_since(perf["start_date"]), moves, upcoming
+    return perf, benchmark.change_pct_since(perf["start_date"]), moves, upcoming, get_income_since(perf["start_date"])
 
 
 async def send_weekly_digest():
@@ -68,7 +72,8 @@ async def send_weekly_digest():
             logger.info("ℹ️ Weekly digest skipped: not enough snapshot history yet")
             return
         privacy = get_setting("privacy_mode", "0") == "1"
-        await send_telegram_message(build_digest(*gathered, privacy))
+        perf, benchmark_pct, moves, upcoming, income = gathered
+        await send_telegram_message(build_digest(perf, benchmark_pct, moves, upcoming, privacy, income))
         logger.info("✅ Weekly digest sent")
     except Exception as e:
         logger.error(f"❌ Error generating weekly digest: {e}")

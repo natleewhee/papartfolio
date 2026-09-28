@@ -1,7 +1,7 @@
 from fetcher import fetch_fx_rate, get_prices_bulk
 from portfolio_db import (
     get_all_holdings, save_daily_snapshot, save_portfolio_aggregate,
-    get_earliest_aggregate_since,
+    get_earliest_aggregate_since, get_income_totals_since,
 )
 from config import HOME_CURRENCY, TIMEZONE
 from datetime import datetime, timedelta
@@ -302,3 +302,46 @@ def get_period_performance(days):
         "net_contribution": round(net_contribution, 2),
         "currency": HOME_CURRENCY,
     }
+
+
+def get_income_since(date):
+    """Realized P&L and net dividends (after withholding tax) recorded from
+    IBKR since `date` (YYYY-MM-DD), each converted to HOME_CURRENCY at today's
+    FX rate. None if nothing was recorded in that window. A currency with no
+    FX rate is left out (listed in "fx_missing") rather than counted 1:1."""
+    totals = get_income_totals_since(date)
+    if not totals:
+        return None
+    rates = {}
+
+    def _home(by_currency):
+        total = 0.0
+        for currency, amount in (by_currency or {}).items():
+            if currency not in rates:
+                rates[currency] = 1.0 if currency == HOME_CURRENCY else fetch_fx_rate(currency, HOME_CURRENCY)
+            if rates[currency]:
+                total += amount * rates[currency]
+        return total
+
+    realized = _home(totals.get("realized"))
+    dividends = _home(totals.get("dividend")) + _home(totals.get("tax"))
+    return {
+        "realized": realized,
+        "dividends": dividends,
+        "currency": HOME_CURRENCY,
+        "fx_missing": sorted(c for c, r in rates.items() if not r),
+    }
+
+
+def format_income_line(income, label, privacy):
+    """e.g. 'Realized YTD: +S$1,200.00 · Dividends YTD (net): +S$85.00'; "" when None."""
+    if not income:
+        return ""
+    currency = income["currency"]
+    line = (
+        f"Realized {label}: {fmt_money(income['realized'], currency, privacy, show_sign=True)} · "
+        f"Dividends {label} (net): {fmt_money(income['dividends'], currency, privacy, show_sign=True)}"
+    )
+    if income.get("fx_missing"):
+        line += f" (excl. {', '.join(income['fx_missing'])} — no FX rate)"
+    return line
