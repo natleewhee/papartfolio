@@ -3,7 +3,7 @@ import pytest
 import ibkr_flex
 from ibkr_flex import (
     is_configured, _parse_positions, _request_statement, _fetch_statement,
-    fetch_flex_positions, reconcile_holdings, _format_summary, _compare_pricing,
+    fetch_flex_statement, reconcile_holdings, _format_summary, _compare_pricing,
     get_last_reconciled_at,
 )
 
@@ -185,19 +185,19 @@ def test_fetch_statement_never_ready_returns_last_error(monkeypatch):
     assert "Statement generation in progress" in error
 
 
-# ---------- fetch_flex_positions (end-to-end error propagation) ----------
+# ---------- fetch_flex_statement (end-to-end error propagation) ----------
 
-def test_fetch_flex_positions_propagates_send_request_error(monkeypatch):
+def test_fetch_flex_statement_propagates_send_request_error(monkeypatch):
     xml = '<FlexStatementResponse><Status>Fail</Status><ErrorMessage>Invalid token</ErrorMessage></FlexStatementResponse>'
     monkeypatch.setattr(ibkr_flex.requests, "get", lambda url, params, timeout: _FakeResponse(xml))
 
-    positions, error = fetch_flex_positions()
+    statement, error = fetch_flex_statement()
 
-    assert positions is None
+    assert statement is None
     assert "Invalid token" in error
 
 
-def test_fetch_flex_positions_success_end_to_end(monkeypatch):
+def test_fetch_flex_statement_success_end_to_end(monkeypatch):
     send_ok = '<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF</ReferenceCode></FlexStatementResponse>'
     report = _flex_xml(
         '<OpenPosition accountId="U123" currency="USD" assetCategory="STK" symbol="AAPL" '
@@ -211,14 +211,19 @@ def test_fetch_flex_positions_success_end_to_end(monkeypatch):
 
     monkeypatch.setattr(ibkr_flex.requests, "get", fake_get)
 
-    positions, error = fetch_flex_positions()
+    statement, error = fetch_flex_statement()
 
     assert error is None
-    assert positions == [{"symbol": "AAPL", "shares": 15, "avg_cost": 148.1, "currency": "USD",
+    assert statement["income"] == []
+    assert statement["positions"] == [{"symbol": "AAPL", "shares": 15, "avg_cost": 148.1, "currency": "USD",
                           "mark_price": None, "unrealized_pnl": None}]
 
 
 # ---------- reconcile_holdings ----------
+
+def _stmt(positions, error=None, income=()):
+    return (None if positions is None else {"positions": positions, "income": list(income)}), error
+
 
 def test_reconcile_not_configured(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", None)
@@ -230,7 +235,7 @@ def test_reconcile_not_configured(monkeypatch):
 def test_reconcile_fetch_failed_carries_error_reason(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (None, "Invalid token (code 1003)"))
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt(None, "Invalid token (code 1003)"))
     result = reconcile_holdings()
     assert result["status"] == "fetch_failed"
     assert result["error"] == "Invalid token (code 1003)"
@@ -239,7 +244,7 @@ def test_reconcile_fetch_failed_carries_error_reason(monkeypatch):
 def test_reconcile_refuses_to_wipe_on_empty_result(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([], None))
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt([], None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
         {"symbol": "AAPL", "shares": 10, "avg_cost": 100.0, "currency": "USD"},
     ])
@@ -255,18 +260,18 @@ def test_reconcile_refuses_to_wipe_on_empty_result(monkeypatch):
 def test_reconcile_empty_ibkr_and_empty_db_is_a_harmless_ok(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([], None))
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt([], None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [])
 
     result = reconcile_holdings()
 
-    assert result == {"status": "ok", "added": [], "updated": [], "removed": [], "pricing": None}
+    assert result == {"status": "ok", "added": [], "updated": [], "removed": [], "pricing": None, "income": []}
 
 
 def test_reconcile_adds_updates_and_removes(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: ([
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt([
         {"symbol": "NVDA", "shares": 5, "avg_cost": 130.0, "currency": "USD"},   # new
         {"symbol": "AAPL", "shares": 15, "avg_cost": 148.1, "currency": "USD"},  # changed shares
         {"symbol": "MSFT", "shares": 3, "avg_cost": 400.0, "currency": "USD"},   # unchanged
@@ -292,12 +297,12 @@ def test_reconcile_no_changes_when_everything_matches(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
     same = [{"symbol": "AAPL", "shares": 10, "avg_cost": 148.1, "currency": "USD"}]
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (same, None))
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt(same, None))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: same)
 
     result = reconcile_holdings()
 
-    assert result == {"status": "ok", "added": [], "updated": [], "removed": [], "pricing": None}
+    assert result == {"status": "ok", "added": [], "updated": [], "removed": [], "pricing": None, "income": []}
 
 
 def test_reconcile_tolerates_float_noise_on_fractional_shares(monkeypatch):
@@ -306,7 +311,7 @@ def test_reconcile_tolerates_float_noise_on_fractional_shares(monkeypatch):
     noise the same way avg_cost's own tolerance already guards against."""
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt(
         [{"symbol": "AAPL", "shares": 12.734, "avg_cost": 148.1, "currency": "USD"}], None,
     ))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
@@ -324,7 +329,7 @@ def test_reconcile_tolerates_float_noise_on_fractional_shares(monkeypatch):
 def test_reconcile_updates_on_real_fractional_share_change(monkeypatch):
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
     monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
-    monkeypatch.setattr(ibkr_flex, "fetch_flex_positions", lambda: (
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt(
         [{"symbol": "AAPL", "shares": 12.734, "avg_cost": 148.1, "currency": "USD"}], None,
     ))
     monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [
@@ -520,3 +525,125 @@ def test_run_reconciliation_skips_timestamp_on_failure(monkeypatch):
     asyncio.run(ibkr_flex.run_reconciliation())
 
     assert set_calls == []
+
+
+# ---------- income: _parse_income / recording / summary ----------
+
+from ibkr_flex import _parse_income, _income_summary
+
+
+def _income_xml(trades="", cash=""):
+    return f"""<FlexQueryResponse><FlexStatements count="1"><FlexStatement accountId="U1">
+      <OpenPositions/>
+      <Trades>{trades}</Trades>
+      <CashTransactions>{cash}</CashTransactions>
+    </FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+
+def test_parse_income_realized_from_closing_trades_only():
+    xml = _income_xml(trades=(
+        '<Trade assetCategory="STK" symbol="AAPL" currency="USD" transactionID="1" tradeDate="20260925" '
+        'fifoPnlRealized="125.5" levelOfDetail="EXECUTION" />'
+        '<Trade assetCategory="STK" symbol="NVDA" currency="USD" transactionID="2" tradeDate="20260925" '
+        'fifoPnlRealized="0" levelOfDetail="EXECUTION" />'  # opening buy
+        '<Trade assetCategory="STK" symbol="AAPL" currency="USD" tradeDate="20260925" '
+        'fifoPnlRealized="125.5" levelOfDetail="ORDER" />'  # summary row — would double count
+        '<Trade assetCategory="OPT" symbol="AAPL C" currency="USD" transactionID="3" tradeDate="20260925" '
+        'fifoPnlRealized="50" />'
+        '<Trade assetCategory="STK" symbol="D05" currency="SGD" tradeID="9" tradeDate="2026-09-24" '
+        'fifoPnlRealized="-20" />'
+    ))
+    events = _parse_income(xml)
+    assert events == [
+        {"id": "trade:1", "date": "2026-09-25", "symbol": "AAPL", "kind": "realized", "amount": 125.5, "currency": "USD"},
+        {"id": "trade:9", "date": "2026-09-24", "symbol": "D05.SI", "kind": "realized", "amount": -20.0, "currency": "SGD"},
+    ]
+
+
+def test_parse_income_dividends_and_withholding():
+    xml = _income_xml(cash=(
+        '<CashTransaction type="Dividends" symbol="MSFT" currency="USD" amount="8.30" transactionID="11" '
+        'dateTime="20260912;202000" levelOfDetail="DETAIL" />'
+        '<CashTransaction type="Withholding Tax" symbol="MSFT" currency="USD" amount="-2.49" transactionID="12" '
+        'dateTime="20260912" />'
+        '<CashTransaction type="Payment In Lieu Of Dividends" symbol="KO" currency="USD" amount="1.00" '
+        'transactionID="13" settleDate="20260915" />'
+        '<CashTransaction type="Deposits/Withdrawals" currency="USD" amount="1000" transactionID="14" dateTime="20260901" />'
+        '<CashTransaction type="Dividends" symbol="MSFT" currency="USD" amount="8.30" levelOfDetail="SUMMARY" />'
+        '<CashTransaction type="Dividends" symbol="T" currency="USD" amount="1" dateTime="20260901" />'  # no id
+    ))
+    events = _parse_income(xml)
+    assert [(e["id"], e["kind"], e["amount"], e["date"]) for e in events] == [
+        ("cash:11", "dividend", 8.3, "2026-09-12"),
+        ("cash:12", "tax", -2.49, "2026-09-12"),
+        ("cash:13", "dividend", 1.0, "2026-09-15"),
+    ]
+
+
+def test_parse_income_absent_sections_is_empty():
+    assert _parse_income(_flex_xml()) == []
+    assert _parse_income("<not><valid") == []
+
+
+def _configured(monkeypatch):
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_TOKEN", "tok")
+    monkeypatch.setattr(ibkr_flex, "IBKR_FLEX_QUERY_ID", "123")
+
+
+INCOME = [{"id": "cash:11", "date": "2026-09-12", "symbol": "MSFT", "kind": "dividend", "amount": 8.3, "currency": "USD"}]
+
+
+def test_reconcile_records_new_income(monkeypatch):
+    _configured(monkeypatch)
+    same = [{"symbol": "AAPL", "shares": 10, "avg_cost": 148.1, "currency": "USD"}]
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt(same, None, INCOME))
+    monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: same)
+    saved = []
+    monkeypatch.setattr(ibkr_flex, "save_income_events", lambda events: saved.extend(events) or list(events))
+
+    result = reconcile_holdings()
+
+    assert saved == INCOME
+    assert result["income"] == INCOME
+
+
+def test_reconcile_records_income_even_when_positions_skipped(monkeypatch):
+    _configured(monkeypatch)
+    monkeypatch.setattr(ibkr_flex, "fetch_flex_statement", lambda: _stmt([], None, INCOME))
+    monkeypatch.setattr(ibkr_flex, "get_all_holdings", lambda: [{"symbol": "AAPL", "shares": 1, "avg_cost": 1, "currency": "USD"}])
+    monkeypatch.setattr(ibkr_flex, "save_income_events", lambda events: list(events))
+
+    result = reconcile_holdings()
+
+    assert result["status"] == "skipped_empty"
+    assert result["income"] == INCOME
+
+
+def test_income_summary_lines_and_privacy(monkeypatch):
+    monkeypatch.setattr(ibkr_flex, "get_setting", lambda key, default=None: "0")
+    text = _income_summary(INCOME)
+    assert "💵 *Recorded*" in text and "MSFT dividend +$8.30 (2026-09-12)" in text
+
+    monkeypatch.setattr(ibkr_flex, "get_setting", lambda key, default=None: "1")
+    assert "8.30" not in _income_summary(INCOME)
+    assert _income_summary([]) == ""
+
+
+def test_income_summary_is_capped(monkeypatch):
+    monkeypatch.setattr(ibkr_flex, "get_setting", lambda key, default=None: "0")
+    events = [dict(INCOME[0], id=f"cash:{i}") for i in range(10)]
+    assert "…and 2 more" in _income_summary(events)
+
+
+def test_parse_income_ignores_interest_withholding_and_unsupported_currencies():
+    xml = _income_xml(
+        trades='<Trade assetCategory="STK" symbol="SAP" currency="EUR" transactionID="5" tradeDate="20260925" fifoPnlRealized="10" />',
+        cash=(
+            '<CashTransaction type="Withholding Tax" currency="USD" amount="-0.40" transactionID="21" dateTime="20260903" '
+            'description="WITHHOLDING @ 20% ON CREDIT INT FOR AUG-2026" />'
+            '<CashTransaction type="Withholding Tax" symbol="X" currency="USD" amount="-0.10" transactionID="22" dateTime="20260903" '
+            'description="WITHHOLDING @ 20% ON CREDIT INT" />'
+            '<CashTransaction type="Dividends" symbol="SAP" currency="EUR" amount="5" transactionID="23" dateTime="20260903" />'
+        ),
+    )
+    assert _parse_income(xml) == []

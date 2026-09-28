@@ -22,8 +22,11 @@ import pytz
 import xml.etree.ElementTree as ET
 import requests
 from config import IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID, HOME_CURRENCY, TIMEZONE
-from portfolio_db import get_all_holdings, add_holding, update_holding, remove_holding, get_setting, set_setting
-from portfolio import calculate_portfolio_metrics, format_shares
+from portfolio_db import (
+    get_all_holdings, add_holding, update_holding, remove_holding, get_setting, set_setting,
+    save_income_events,
+)
+from portfolio import calculate_portfolio_metrics, format_shares, fmt_money
 from fetcher import fetch_fx_rate
 from telegram_handler import send_telegram_message
 
@@ -178,10 +181,82 @@ def _parse_positions(xml_text):
     return positions
 
 
-def fetch_flex_positions():
-    """End-to-end Flex fetch: request -> poll -> parse. Returns
-    (positions, error) — positions is None if the fetch failed at any stage,
-    with `error` describing why."""
+DIVIDEND_TYPES = {"Dividends": "dividend", "Payment In Lieu Of Dividends": "dividend", "Withholding Tax": "tax"}
+INCOME_KIND_LABELS = {"realized": "realized", "dividend": "dividend", "tax": "withholding tax"}
+
+
+def _flex_date(value):
+    """'20260925', '20260925;160000', or '2026-09-25 ...' -> '2026-09-25' (None if unparseable)."""
+    digits = "".join(ch for ch in (value or "")[:10] if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _flex_symbol(symbol, currency):
+    symbol = (symbol or "").upper()
+    if currency == "SGD" and symbol and not symbol.endswith(".SI"):
+        return f"{symbol}.SI"
+    return symbol
+
+
+def _parse_income(xml_text):
+    """Realized P&L (from Trades) and dividends/withholding tax (from Cash
+    Transactions), if the Flex Query includes those sections. Returns a list
+    of {"id", "date", "symbol", "kind", "amount", "currency"}; [] if the
+    sections are absent. Only per-execution/per-detail rows are used —
+    summary rows would double count — and rows without an IBKR ID are
+    skipped, since the ID is what makes re-reading a report idempotent."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    events = []
+    for el in root.iter("Trade"):
+        if el.get("assetCategory") != "STK" or el.get("levelOfDetail", "EXECUTION") != "EXECUTION":
+            continue
+        txn_id = el.get("transactionID") or el.get("tradeID")
+        pnl, date = el.get("fifoPnlRealized"), _flex_date(el.get("tradeDate") or el.get("dateTime"))
+        try:
+            amount = float(pnl) if pnl not in (None, "") else 0.0
+        except ValueError:
+            continue
+        currency = el.get("currency")
+        if not txn_id or not date or abs(amount) < 0.005 or currency not in SUPPORTED_CURRENCIES:
+            continue  # opening trades carry no realized P&L
+        events.append({"id": f"trade:{txn_id}", "date": date, "symbol": _flex_symbol(el.get("symbol"), currency),
+                       "kind": "realized", "amount": amount, "currency": currency})
+
+    for el in root.iter("CashTransaction"):
+        kind = DIVIDEND_TYPES.get(el.get("type"))
+        if not kind or el.get("levelOfDetail", "DETAIL") != "DETAIL":
+            continue
+        # Withholding on credit interest has no symbol; only dividend tax
+        # belongs in "dividends (net)".
+        if kind == "tax" and (not el.get("symbol") or "CREDIT INT" in (el.get("description") or "").upper()):
+            continue
+        currency = el.get("currency")
+        if currency not in SUPPORTED_CURRENCIES:
+            continue
+        txn_id = el.get("transactionID")
+        date = _flex_date(el.get("dateTime") or el.get("settleDate") or el.get("reportDate"))
+        try:
+            amount = float(el.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        if not txn_id or not date:
+            logger.warning(f"⚠️ Skipping IBKR cash transaction without ID/date: {el.get('symbol')!r}")
+            continue
+        events.append({"id": f"cash:{txn_id}", "date": date, "symbol": _flex_symbol(el.get("symbol"), currency),
+                       "kind": kind, "amount": amount, "currency": currency})
+    return events
+
+
+def fetch_flex_statement():
+    """End-to-end Flex fetch: request -> poll -> parse. Returns (statement,
+    error) — statement is {"positions": [...], "income": [...]}, or None if the
+    fetch failed at any stage, with `error` describing why."""
     reference_code, error = _request_statement()
     if not reference_code:
         return None, error
@@ -191,7 +266,7 @@ def fetch_flex_positions():
     positions = _parse_positions(xml_text)
     if positions is None:
         return None, "malformed XML in Flex report"
-    return positions, None
+    return {"positions": positions, "income": _parse_income(xml_text)}, None
 
 
 def _compare_pricing(ibkr_positions):
@@ -268,14 +343,22 @@ def reconcile_holdings():
         "removed": [{"symbol", "shares", "avg_cost", "currency"}, ...],
         "error": str | None,  # only meaningful when status == "fetch_failed"
         "pricing": dict | None,  # see _compare_pricing(); only meaningful when status == "ok"
+        "income": [...],  # income events newly recorded this run (see _parse_income)
     }
+
+    Income events are recorded even when holdings are left untouched
+    (skipped_empty) — they're independent of the positions diff, and
+    storing them is idempotent.
     """
     if not is_configured():
-        return {"status": "not_configured", "added": [], "updated": [], "removed": [], "pricing": None}
+        return {"status": "not_configured", "added": [], "updated": [], "removed": [], "pricing": None, "income": []}
 
-    ibkr_positions, error = fetch_flex_positions()
-    if ibkr_positions is None:
-        return {"status": "fetch_failed", "added": [], "updated": [], "removed": [], "error": error, "pricing": None}
+    statement, error = fetch_flex_statement()
+    if statement is None:
+        return {"status": "fetch_failed", "added": [], "updated": [], "removed": [], "error": error,
+                "pricing": None, "income": []}
+    ibkr_positions = statement["positions"]
+    new_income = save_income_events(statement["income"]) if statement["income"] else []
 
     current = {h["symbol"]: h for h in get_all_holdings()}
     ibkr_by_symbol = {p["symbol"]: p for p in ibkr_positions}
@@ -286,7 +369,8 @@ def reconcile_holdings():
             f"holds {len(current)} — treating as a likely fetch/parse issue, "
             "not touching holdings."
         )
-        return {"status": "skipped_empty", "added": [], "updated": [], "removed": [], "pricing": None}
+        return {"status": "skipped_empty", "added": [], "updated": [], "removed": [], "pricing": None,
+                "income": new_income}
 
     added, updated, removed = [], [], []
 
@@ -313,7 +397,8 @@ def reconcile_holdings():
 
     pricing = _compare_pricing(ibkr_positions)
 
-    return {"status": "ok", "added": added, "updated": updated, "removed": removed, "pricing": pricing}
+    return {"status": "ok", "added": added, "updated": updated, "removed": removed, "pricing": pricing,
+            "income": new_income}
 
 
 def _format_summary(result):
@@ -336,7 +421,7 @@ def _format_summary(result):
             "IBKR returned zero stock positions while you currently hold some — "
             "this looks like a fetch/parse issue, not a real liquidation. "
             "Holdings left unchanged; please check manually."
-        )
+        ) + _income_summary(result.get("income"))
 
     added, updated, removed = result["added"], result["updated"], result["removed"]
     if not added and not updated and not removed:
@@ -355,6 +440,8 @@ def _format_summary(result):
             lines.append(f"➖ Removed {h['symbol']} (no longer held)")
         sync_summary = "\n".join(lines)
 
+    sync_summary += _income_summary(result.get("income"))
+
     pricing = result.get("pricing")
     if not pricing:
         return sync_summary
@@ -371,6 +458,26 @@ def _format_summary(result):
             )
 
     return sync_summary + "\n\n" + "\n".join(pricing_lines)
+
+
+MAX_INCOME_SUMMARY_LINES = 8
+
+
+def _income_summary(events):
+    """Lines for newly recorded realized P&L / dividends, or "" if none.
+    Masked under privacy mode like any other dollar amount."""
+    if not events:
+        return ""
+    privacy = get_setting("privacy_mode", "0") == "1"
+    lines = ["", "", "💵 *Recorded*"]
+    for e in events[:MAX_INCOME_SUMMARY_LINES]:
+        lines.append(
+            f"{e['symbol']} {INCOME_KIND_LABELS[e['kind']]} "
+            f"{fmt_money(e['amount'], e['currency'], privacy, show_sign=True)} ({e['date']})"
+        )
+    if len(events) > MAX_INCOME_SUMMARY_LINES:
+        lines.append(f"…and {len(events) - MAX_INCOME_SUMMARY_LINES} more")
+    return "\n".join(lines)
 
 
 def get_last_reconciled_at():

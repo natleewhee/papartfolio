@@ -43,7 +43,12 @@ BENCHMARK_LABEL = "S&P 500"
 # Management: Reports > Flex Queries > new "Activity"/"Open Positions" query
 # including at minimum Symbol, Position, Cost Basis Price, Currency, and
 # Asset Category columns, then Reports > Settings > Flex Web Service to
-# generate the token.
+# generate the token. Optional, for realized P&L and dividends: add the
+# "Trades" section (Realized P&L, Trade Date, Transaction ID, Level of Detail
+# = Execution) and "Cash Transactions" section (Dividends, Withholding Tax,
+# Payment In Lieu; with Transaction ID, Date/Time, Amount), and set the
+# query's period to "Last 7 Calendar Days" so a missed run is caught up —
+# events are de-duplicated by transaction ID.
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 
