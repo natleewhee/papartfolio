@@ -25,6 +25,7 @@ from alerts import check_price_alerts
 from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
+import job_monitor
 from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
 
 import logging
@@ -153,7 +154,14 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
 
     # Setup scheduler for daily report + periodic alert checks
-    scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
+    # A 5-min misfire grace: APScheduler's default is 1s, so a brief event-loop
+    # stall at the scheduled moment would silently skip the run (e.g. the daily
+    # report). coalesce collapses a backlog into one run instead of several.
+    scheduler = AsyncIOScheduler(
+        timezone=pytz.timezone(TIMEZONE),
+        job_defaults={"misfire_grace_time": 300, "coalesce": True},
+    )
+    job_monitor.install(scheduler)
     app.bot_data["scheduler"] = scheduler  # so /settime can reschedule live
 
     # Report time is user-configurable via /settime; falls back to the config default

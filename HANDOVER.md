@@ -95,6 +95,11 @@ alerts.py             Price threshold alert evaluation, checked every 15
 market_notifications.py   Market open/close Telegram pings — no-ops if
                       nothing is held in that market's currency.
 
+job_monitor.py        APScheduler listener: messages you once when a job
+                      raises past its own error handling or misses its
+                      run time, stays quiet while it keeps failing, and
+                      sends one "recovered" note on the next success.
+
 ibkr_flex.py          IBKR Flex Web Service integration: request → poll →
                       parse XML → diff against the bot's holdings table →
                       apply add/update/remove. Also cross-checks the bot's
@@ -283,7 +288,7 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
 
 | Job | Schedule | Notes |
 |---|---|---|
-| Daily report | `DAILY_REPORT_TIME` (default 20:30 SGT), weekdays | Live-reschedulable via `/settime` |
+| Daily report | `DAILY_REPORT_TIME` (default 20:30 SGT); Mon–Fri, or Tue–Sat when the time is before SG market open (`config.daily_report_day_of_week`) | Live-reschedulable via `/settime` |
 | Price alert check | Every 15 min | |
 | Market open/close pings | Per-market open/close time (own timezone), weekdays | Open pings fire +30s (quote-feed lag); no-op if nothing held in that currency |
 | IBKR reconcile (early) | 10 min after each market's close, that market's own timezone | Best-effort; may re-read the previous day's snapshot (see §5) |
@@ -302,10 +307,12 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
   `httpx>=0.25` requirement needs; earlier PTB versions pin an
   incompatible `httpx~=0.24`, which breaks `pip install` outright
   (`ResolutionImpossible`) once `anthropic` is added as a dependency.
-- No CI pipeline configured in this repo — verification before merging is
-  manual: `python -m py_compile` + `python -m pytest tests/ -q` + (for
-  dependency/runtime changes) a real clean-venv install under the target
-  Python version.
+- CI: `.github/workflows/tests.yml` runs `py_compile` + `pytest` on every
+  PR and push to `main`. Still run them locally before pushing, and for
+  dependency/runtime changes also do a real clean-venv install under the
+  target Python version.
+- All jobs share a 5-min `misfire_grace_time` (`main.py`) — APScheduler's 1s
+  default would silently skip a run after any brief event-loop stall.
 - Deploys are triggered by pushes to `main`; there's no staging
   environment.
 
@@ -315,14 +322,9 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
 
 `pytest tests/` — one test file roughly per module, all mocked (no real
 network/API calls, no real Telegram/Turso/IBKR/Anthropic connections).
-Known flaky spot: 5 tests in `test_earnings.py` intermittently fail on a
-`days_until` off-by-one — root cause not fully chased down, but it's a
-`date.today()` (test, system-local) vs `earnings._today()` (module,
-SGT-aware) day-boundary mismatch depending on what time/timezone the test
-runner itself executes in. Confirmed pre-existing and unrelated to any
-change made in recent PRs (reproduced identically on `main` via
-`git stash`). Worth a real fix (make the test inject/mock "today" instead
-of relying on wall-clock time) if it keeps tripping people up.
+Tests that depend on "today" must derive it from the module's own
+timezone-aware helper (e.g. `earnings._today()`), not `date.today()` —
+mixing the two caused day-boundary flakiness in `test_earnings.py` (fixed).
 
 ---
 
@@ -334,10 +336,9 @@ of relying on wall-clock time) if it keeps tripping people up.
 - No holiday calendar for market open/close pings or reconciliation
   scheduling — a market holiday just means those jobs no-op harmlessly
   (no holdings priced that day) rather than being skipped intelligently.
-- No staging environment or CI; verification is manual before every push.
+- No staging environment; `main` deploys straight to Render.
 - AI brief quality depends entirely on the model's web search results for
   that day — no fallback content if search comes back thin.
-- `test_earnings.py`'s day-boundary flakiness (see §10) hasn't been root-caused.
 
 ---
 
