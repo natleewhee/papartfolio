@@ -673,18 +673,54 @@ async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"✅ Daily report time saved as {time_str} {TIMEZONE} — takes effect after next restart")
 
+def _set_price_alert(symbol, direction, threshold):
+    """Create the alert, or edit the existing active one for the same
+    symbol+direction in place (no duplicate). Returns the reply text."""
+    currency = get_currency_for_symbol(symbol)
+    existing = find_active_alert(symbol, direction)
+    if existing:
+        if update_alert_threshold(existing["id"], threshold):
+            return (
+                f"✅ Alert #{existing['id']} updated: {symbol} {direction} "
+                f"{fmt_money(threshold, currency)} (was {fmt_money(existing['threshold'], currency)})"
+            )
+        return "❌ Error updating alert"
+    alert_id = create_alert(symbol, direction, threshold)
+    if alert_id:
+        return f"✅ Alert #{alert_id} set: {symbol} {direction} {fmt_money(threshold, currency)}"
+    return "❌ Error creating alert"
+
+async def _alert_suggestions(update, symbol):
+    status = await update.message.reply_text(f"🔄 Finding alert levels for {symbol}...")
+    try:
+        msg, keyboard = await _levels_reply(symbol)
+        if keyboard:
+            msg += "\n\nTap a level to set an alert, or use /alert SYMBOL above|below PRICE."
+        await update.message.reply_text(msg, parse_mode=_levels_parse_mode(msg), reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Error in /alert {symbol} suggestions: {e}")
+        await update.message.reply_text(f"❌ Couldn't compute alert levels for {symbol}: {e}")
+    finally:
+        await _delete_quietly(status)
+
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /alert SYMBOL above|below THRESHOLD"""
+    """Handle /alert SYMBOL above|below THRESHOLD, or /alert SYMBOL alone to
+    get one-tap suggestions at its support/resistance levels."""
     if not await check_user(update):
         return
 
+    parts = update.message.text.split()
+    if len(parts) == 2:
+        await _alert_suggestions(update, parts[1].upper())
+        return
+
     try:
-        parts = update.message.text.split()
         if len(parts) != 4 or parts[2].lower() not in ("above", "below"):
             await update.message.reply_text(
                 "❌ Invalid format\n\n"
                 "Usage: /alert SYMBOL above|below THRESHOLD\n"
-                "Example: /alert AAPL above 200"
+                "Example: /alert AAPL above 200\n\n"
+                "Or /alert AAPL for suggested levels"
             )
             return
 
@@ -696,26 +732,7 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Invalid ticker: {symbol}")
             return
 
-        currency = get_currency_for_symbol(symbol)
-
-        # If an active alert already exists for this symbol+direction, edit it
-        # in place instead of creating a duplicate (no more unalert+realert)
-        existing = find_active_alert(symbol, direction)
-        if existing:
-            if update_alert_threshold(existing["id"], threshold):
-                await update.message.reply_text(
-                    f"✅ Alert #{existing['id']} updated: {symbol} {direction} "
-                    f"{fmt_money(threshold, currency)} (was {fmt_money(existing['threshold'], currency)})"
-                )
-            else:
-                await update.message.reply_text("❌ Error updating alert")
-            return
-
-        alert_id = create_alert(symbol, direction, threshold)
-        if alert_id:
-            await update.message.reply_text(f"✅ Alert #{alert_id} set: {symbol} {direction} {fmt_money(threshold, currency)}")
-        else:
-            await update.message.reply_text("❌ Error creating alert")
+        await update.message.reply_text(_set_price_alert(symbol, direction, threshold))
 
     except ValueError:
         await update.message.reply_text("❌ Threshold must be a number")
@@ -986,25 +1003,38 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_chunked(update, msg, parse_mode="Markdown")
     await _delete_quietly(status)
 
-async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /support SYMBOL — support and resistance levels for one stock
-    (works for any ticker, not just watchlist ones). For all your watchlist
-    stocks at once, see /watchlist instead."""
-    if not await check_user(update):
-        return
+def alert_suggestion_keyboard(symbol, support_data, resistance_data):
+    """One-tap alert buttons at the computed levels: below each support, above
+    short-term resistance. Callback data is self-contained (no server-side
+    state), so the buttons keep working after a restart."""
+    currency = get_currency_for_symbol(symbol)
+    options = []
+    for label, data, key, direction in (
+        ("ST support", support_data, "short_term", "below"),
+        ("MT support", support_data, "mid_term", "below"),
+        ("ST resistance", resistance_data, "short_term", "above"),
+    ):
+        level = (data or {}).get(key)
+        if level and level["level"] > 0:
+            # 2dp for normal prices; 4 significant digits below $1 so a
+            # sub-cent level doesn't round to a 0.0 threshold.
+            sub_dollar = level["level"] < 1
+            price = float(f"{level['level']:.4g}") if sub_dollar else round(level["level"], 2)
+            options.append(InlineKeyboardButton(
+                f"🔔 {direction.capitalize()} {fmt_money(price, currency, decimals=4 if sub_dollar else 2)} ({label})",
+                callback_data=f"alert:{symbol}:{direction}:{price}",
+            ))
+    if not options:
+        return None
+    return InlineKeyboardMarkup([[button] for button in options])
 
-    parts = update.message.text.split()
-    if len(parts) != 2:
-        await update.message.reply_text(
-            "❌ Invalid format\n\n"
-            "Usage: /support SYMBOL\n"
-            "Example: /support AAPL\n\n"
-            "For all your watchlist stocks at once, use /watchlist"
-        )
-        return
+def _levels_parse_mode(msg):
+    """_levels_reply's error text is plain (it echoes user input); the levels message is Markdown."""
+    return None if msg.startswith("❌") else "Markdown"
 
-    symbol = parts[1].upper()
-    status = await update.message.reply_text(f"🔄 Computing support & resistance for {symbol}...")
+async def _levels_reply(symbol):
+    """(message, keyboard) with support & resistance for `symbol`, or
+    (error message, None) if neither can be computed."""
     currency = get_currency_for_symbol(symbol)
     price_data = await asyncio.to_thread(get_price, symbol)
     current_price = price_data["price"] if price_data and price_data.get("price") else None
@@ -1013,14 +1043,10 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manual_mt = entry.get("manual_mt_support") if entry else None
     support_data = await asyncio.to_thread(resolve_support_levels, symbol, current_price, manual_st, manual_mt)
     # Resistance has no manual-override path — it's never been settable via
-    # /watch the way support is, and this merge doesn't add one.
+    # /watch the way support is.
     resistance_data = await asyncio.to_thread(compute_resistance_levels, symbol, current_price)
     if not support_data and not resistance_data:
-        await update.message.reply_text(
-            f"❌ Couldn't compute support/resistance for {symbol} — not enough price history or invalid ticker."
-        )
-        await _delete_quietly(status)
-        return
+        return f"❌ Couldn't compute support/resistance for {symbol} — not enough price history or invalid ticker.", None
 
     display_price = (support_data or resistance_data)["current_price"]
 
@@ -1048,8 +1074,53 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Mid-term: {resistance_leg(resistance_data['mid_term'])}\n\n"
         )
     msg += "_(%) = distance from today's price to that level._"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    return msg, alert_suggestion_keyboard(symbol, support_data, resistance_data)
+
+async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /support SYMBOL — support and resistance levels for one stock
+    (works for any ticker, not just watchlist ones), with one-tap alert
+    buttons. For all your watchlist stocks at once, see /watchlist instead."""
+    if not await check_user(update):
+        return
+
+    parts = update.message.text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format\n\n"
+            "Usage: /support SYMBOL\n"
+            "Example: /support AAPL\n\n"
+            "For all your watchlist stocks at once, use /watchlist"
+        )
+        return
+
+    symbol = parts[1].upper()
+    status = await update.message.reply_text(f"🔄 Computing support & resistance for {symbol}...")
+    msg, keyboard = await _levels_reply(symbol)
+    await update.message.reply_text(msg, parse_mode=_levels_parse_mode(msg), reply_markup=keyboard)
     await _delete_quietly(status)
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stateless inline buttons: `levels:SYMBOL` (from the daily report's
+    Signals) and `alert:SYMBOL:above|below:PRICE` (alert suggestions)."""
+    query = update.callback_query
+    if query.from_user.id != TELEGRAM_USER_ID:
+        await query.answer("❌ Unauthorized", show_alert=True)
+        return
+    await query.answer()
+    # Reply to the chat directly: query.message can be an inaccessible stub
+    # (e.g. the report was deleted), which has no reply_text.
+    send = context.bot.send_message
+    kind, _, rest = query.data.partition(":")
+    try:
+        if kind == "levels":
+            msg, keyboard = await _levels_reply(rest)
+            await send(chat_id=TELEGRAM_USER_ID, text=msg, parse_mode=_levels_parse_mode(msg), reply_markup=keyboard)
+        elif kind == "alert":
+            symbol, direction, threshold = rest.split(":")
+            await send(chat_id=TELEGRAM_USER_ID, text=_set_price_alert(symbol, direction, float(threshold)))
+    except Exception as e:
+        logger.error(f"Error in button {query.data}: {e}")
+        await send(chat_id=TELEGRAM_USER_ID, text=f"❌ Error: {e}")
 
 async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /earnings [SYMBOL] — next earnings date + last reported result
@@ -1249,6 +1320,7 @@ whichever you actually hold)
 *— Alerts —*
 /alert SYMBOL above|below THRESHOLD — notify me when a price crosses a level
   (re-running this on the same symbol+direction edits the threshold in place)
+/alert SYMBOL — suggested alert levels at support/resistance (tap to set)
 /alertsupport SYMBOL [PCT] — notify when price comes within PCT% of support
   (default 5%; re-running on the same symbol edits the percent in place)
 /alerts — list active alerts

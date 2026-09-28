@@ -226,6 +226,14 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
   today's dollar move (`$CHG`, from `daily_change_$`) next to its percent
   — the same "$ then %" convention used in the report's `Today` line.
   This same table now backs both the daily report and `/list`.
+- **Inline buttons are stateless**: the daily report carries a
+  `📉📈 SYMBOL` button per Signals-flagged symbol (movers, near support,
+  near EMA; max 6) with callback `levels:SYMBOL`, and level replies carry
+  `alert:SYMBOL:above|below:PRICE` buttons. All state is in the callback
+  data, so they keep working after restarts (unlike `/remove`-style
+  confirmations, which use in-memory `pending_action`). `on_button` is
+  registered before `on_confirmation`, which catches everything else, and
+  replies via `context.bot.send_message` rather than `query.message`.
 - **Benchmark alignment**: a portfolio snapshot dated D is taken before
   that day's US session closes (for both early-morning and 20:30 SGT report
   times), so it reflects the prior US close. `benchmark.change_pct_since`
@@ -271,8 +279,8 @@ just an idempotent `ALTER TABLE` at the top of `init_db()`.
 | `/settings` | View privacy/report-style + IBKR/AI-brief configured status (with masked key preview); points to `/schedule` for report timing |
 | `/schedule` | Full notification + reconciliation schedule, including the daily report's time and day range |
 | `/privacy`, `/reportstyle`, `/settime` | Report preferences |
-| `/alert`, `/alerts`, `/unalert`, `/alertsupport` | Price threshold alerts |
-| `/support SYMBOL` | On-demand support **and** resistance levels for one stock |
+| `/alert`, `/alerts`, `/unalert`, `/alertsupport` | Price threshold alerts. `/alert SYMBOL` alone offers one-tap alerts at support/resistance |
+| `/support SYMBOL` | On-demand support **and** resistance levels for one stock, with one-tap alert buttons |
 | `/watch`, `/unwatch`, `/watchlist` | Watchlist management (auto or manual ST/MT levels) |
 | `/earnings` | Earnings dates/results for holdings + watchlist |
 | `/reconcile` | Manually trigger IBKR reconciliation |

@@ -17,7 +17,7 @@ from bot_handlers import (
     cmd_settime, cmd_alert, cmd_alerts, cmd_unalert, cmd_alertsupport,
     cmd_support, cmd_watch, cmd_unwatch, cmd_watchlist,
     cmd_earnings, cmd_reconcile, cmd_brief,
-    cmd_help, cmd_start, cmd_unknown, on_confirmation,
+    cmd_help, cmd_start, cmd_unknown, on_confirmation, on_button,
     BOT_COMMANDS,
 )
 from telegram_handler import send_daily_report
@@ -147,6 +147,8 @@ def main():
     app.add_handler(CommandHandler("reconcile", cmd_reconcile))
     app.add_handler(CommandHandler("brief", cmd_brief))
 
+    # Stateless level/alert buttons first — on_confirmation catches everything else
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(levels|alert):"))
     # Inline Confirm/Cancel buttons for /remove, /update, /clear
     app.add_handler(CallbackQueryHandler(on_confirmation))
 
