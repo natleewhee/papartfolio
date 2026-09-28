@@ -268,6 +268,19 @@ def get_earliest_aggregate_since(cutoff_date):
         logger.error(f"❌ Error fetching aggregate since {cutoff_date}: {e}")
         return None
 
+def get_snapshot_prices_on(date):
+    """{symbol: price} from daily_snapshots for exactly `date` (YYYY-MM-DD)."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, price FROM daily_snapshots WHERE date = ?", (date,))
+        rows = cursor.fetchall()
+        conn.close()
+        return {symbol: price for symbol, price in rows}
+    except Exception as e:
+        logger.error(f"❌ Error fetching snapshots for {date}: {e}")
+        return {}
+
 # ==================== SETTINGS ====================
 
 def get_setting(key, default=None):

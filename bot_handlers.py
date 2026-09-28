@@ -28,7 +28,7 @@ from ibkr_flex import run_reconciliation, is_configured as ibkr_configured, get_
 from ai_brief import generate_market_brief, is_configured as ai_brief_configured, key_preview as ai_brief_key_preview
 from telegram_handler import send_daily_report, chunk_message
 import benchmark
-from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
+from config import TELEGRAM_USER_ID, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, WEEKLY_DIGEST_TIME, daily_report_day_of_week
 from datetime import datetime
 import logging
 
@@ -549,7 +549,11 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report_days = daily_report_day_of_week(report_time).replace("-", "–").title()
     held_currencies = {(h.get("currency") or "USD") for h in get_all_holdings()}
 
-    lines = ["📅 *Notification Schedule*", "", f"Daily report: {report_time} {TIMEZONE} ({report_days})", ""]
+    lines = [
+        "📅 *Notification Schedule*", "",
+        f"Daily report: {report_time} {TIMEZONE} ({report_days})",
+        f"Weekly digest: Sat {WEEKLY_DIGEST_TIME} {TIMEZONE}", "",
+    ]
 
     for market in MARKETS.values():
         tz = market["timezone"]
@@ -582,7 +586,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
 
     lines.append("_Market pings & reconciliation: Mon-Fri. US jobs skip NYSE holidays and follow half-day early closes (1pm ET). Daily report days shown above. Market pings fire only for markets you hold._")
-    lines.append("_(Price alerts are separate & event-based — see /alerts.)_")
+    lines.append("_(Price alerts are checked every 15 min while their market is open — see /alerts.)_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):

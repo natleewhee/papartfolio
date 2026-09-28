@@ -98,6 +98,12 @@ alerts.py             Price threshold alert evaluation, checked every 15
 market_notifications.py   Market open/close Telegram pings — no-ops if
                       nothing is held in that market's currency.
 
+weekly_digest.py      Saturday week in review (WEEKLY_DIGEST_TIME, SGT):
+                      week's change vs S&P 500, best/worst holding (from
+                      the start snapshot's per-symbol prices; holdings
+                      bought mid-week are skipped), earnings in the next 7
+                      days. Skipped until a week of snapshots exists.
+
 benchmark.py          S&P 500 (SPY) comparison: daily change for the
                       report's "vs S&P 500" line, and change since a
                       snapshot date for /week and /month. Returns None on
@@ -314,6 +320,7 @@ overrides at runtime), `HOME_CURRENCY` (SGD), `IBKR_RECONCILE_CATCHUP_TIME`
 | Job | Schedule | Notes |
 |---|---|---|
 | Daily report | `DAILY_REPORT_TIME` (default 20:30 SGT); Mon–Fri, or Tue–Sat when the time is before SG market open (`config.daily_report_day_of_week`) | Live-reschedulable via `/settime` |
+| Weekly digest | `WEEKLY_DIGEST_TIME` (default 10:00 SGT), Saturday | Needs ≥1 week of `portfolio_aggregates` history |
 | Price alert check | Every 15 min | Each alert only checked while its market is open (+15 min after close) |
 | Market open/close pings | Per-market open/close time (own timezone), weekdays | Open pings fire +30s (quote-feed lag); no-op if nothing held in that currency. US: skips NYSE holidays; close ping also scheduled at the 13:00 ET half-day close (`market_us_close_early`), only one of the two runs per day |
 | IBKR reconcile (early) | 10 min after each market's close, that market's own timezone | Best-effort; may re-read the previous day's snapshot (see §5). US follows holidays/half-days like the close ping |
