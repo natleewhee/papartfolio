@@ -21,13 +21,14 @@ from bot_handlers import (
     BOT_COMMANDS,
 )
 from telegram_handler import send_daily_report
+from weekly_digest import send_weekly_digest
 from alerts import check_price_alerts
 from market_notifications import notify_us_open, notify_us_close, notify_sg_open, notify_sg_close
 from ibkr_flex import run_reconciliation, is_configured as ibkr_configured
 from portfolio_db import init_db, get_setting
 import job_monitor
 from market_calendar import run_on_us_trading_days, run_if_us_closes_at, run_if_last_us_session_traded
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, daily_report_day_of_week
+from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DAILY_REPORT_TIME, MARKETS, IBKR_RECONCILE_CATCHUP_TIME, WEEKLY_DIGEST_TIME, daily_report_day_of_week
 
 import logging
 logging.basicConfig(
@@ -177,6 +178,15 @@ def main():
         CronTrigger(hour=hour, minute=minute, day_of_week=daily_report_day_of_week(report_time), timezone=pytz.timezone(TIMEZONE)),
         id="daily_report",
         name="Daily Portfolio Report",
+        replace_existing=True,
+    )
+
+    digest_hour, digest_minute = map(int, WEEKLY_DIGEST_TIME.split(":"))
+    scheduler.add_job(
+        send_weekly_digest,
+        CronTrigger(hour=digest_hour, minute=digest_minute, day_of_week="sat", timezone=pytz.timezone(TIMEZONE)),
+        id="weekly_digest",
+        name="Weekly Digest",
         replace_existing=True,
     )
 

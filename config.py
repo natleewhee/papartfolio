@@ -56,6 +56,10 @@ IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 # report time is as fresh as IBKR allows.
 IBKR_RECONCILE_CATCHUP_TIME = "20:00"
 
+# Saturday week-in-review, SGT. After Friday's US close (~04:00-05:00 SGT)
+# and the early-morning daily report.
+WEEKLY_DIGEST_TIME = "10:00"
+
 # Anthropic API (optional — AI-generated market brief with web search,
 # synthesizing overnight/company news for the daily report and /brief).
 # Leave unset to disable it entirely, nothing else breaks.
